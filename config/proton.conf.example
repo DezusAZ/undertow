@@ -1,0 +1,19 @@
+# ProtonVPN WireGuard config.
+#
+# 1. Log in at https://account.protonvpn.com  ->  Downloads  ->  WireGuard configuration
+# 2. IMPORTANT: enable the "P2P" / "NAT-PMP" filter and pick a server that
+#    allows P2P (Proton marks them with a double-arrow icon).
+# 3. Generate the config, then paste its contents below.
+# 4. Save this file as  config/proton.conf  (drop the .example) and restart.
+#
+# It will look like this:
+
+[Interface]
+PrivateKey = <your-private-key>
+Address = 10.2.0.2/32
+DNS = 10.2.0.1
+
+[Peer]
+PublicKey = <server-public-key>
+AllowedIPs = 0.0.0.0/0
+Endpoint = <server-ip>:51820

@@ -1,0 +1,37 @@
+# secrets / credentials
+*.gh_token
+.gh_token
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_ed25519
+secrets.*
+credentials.*
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# node
+node_modules/
+# data / heavy binaries (back up code, not blobs)
+*.qcow2
+*.img
+*.iso
+*.gguf
+*.bin
+*.zip
+*.tar
+*.tar.gz
+*.apk
+*.mp4
+*.sqlite
+*.db
+# os cruft
+.DS_Store
+*.log
+
+# secrets — never back up
+config/secret

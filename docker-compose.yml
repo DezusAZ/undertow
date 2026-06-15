@@ -1,0 +1,172 @@
+services:
+  vpntorrent:
+    build: .
+    image: vpntorrent
+    container_name: vpntorrent
+    cap_add:
+      - NET_ADMIN          # needed to bring up WireGuard + killswitch
+    devices:
+      - /dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1   # required for the wg-quick killswitch
+    environment:
+      - PORT=8722          # web UI port (kept identical inside & out so the
+                           # ZimaOS dashboard tile always resolves correctly)
+      - VT_PASSWORD=${VT_PASSWORD:-changeme}   # set in .env (the installer writes it)
+      - TMDB_API_KEY=${TMDB_API_KEY:-}   # <-- optional: a free TMDB API key enables poster art +
+                           # descriptions in the Library tab. Get one at
+                           # themoviedb.org/settings/api. Leave blank to skip.
+      - TRANSCODER_URL=http://${TRANSCODER_IP:-172.24.9.2}:8723   # decoder sandbox
+    ports:
+      - "${WEB_PORT:-8722}:8722"   # web UI -> http://<host>:${WEB_PORT}
+    volumes:
+      - ./config:/config                              # drop proton.conf here
+      - ${MEDIA_PATH}:/downloads     # 11TB drive: movies/tv/music/...
+      - ./jackett-config:/jackett:ro                  # read Jackett's API key
+    labels:
+      icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0IiBmaWxsPSJub25lIj48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxMiIgZmlsbD0iIzIzODYzNiIvPjxwYXRoIGQ9Ik0zMiAxMGwxNiA2djEyYzAgMTEtNyAxOC0xNiAyMi05LTQtMTYtMTEtMTYtMjJWMTZsMTYtNnoiIGZpbGw9IndoaXRlIiBmaWxsLW9wYWNpdHk9IjAuMTUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMi41IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTTMyIDIydjE1TTI0IDMxbDggOCA4LTgiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+"
+    restart: unless-stopped
+    networks:
+      default: {}        # internet (for the VPN bootstrap) + the bridge for siblings
+      sandbox:           # reach the decoder sandbox at 172.24.9.2 (no DNS needed)
+        ipv4_address: ${VPNTORRENT_SANDBOX_IP:-172.24.9.3}   # pinned ≠ the sandbox's .2
+
+  # Torrent search engine. Shares vpntorrent's network namespace, so ALL its
+  # searches go out through the same Proton tunnel + killswitch. Not published to
+  # the host — only the vpntorrent app reaches it (127.0.0.1:9117 inside the ns).
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    container_name: vpntorrent-jackett
+    depends_on:
+      - vpntorrent
+    network_mode: "service:vpntorrent"     # share the VPN namespace
+    environment:
+      - PUID=999
+      - PGID=1000
+      - TZ=${TZ:-America/Phoenix}
+    volumes:
+      - ./jackett-config:/config
+      - ./jackett-resolv.conf:/etc/resolv.conf:ro   # force DNS through the tunnel
+    restart: unless-stopped
+
+  # Cloudflare / DDoS-Guard challenge solver (headless Chromium). Shares the VPN
+  # namespace too, so the sites it visits also see the Proton exit IP, not yours.
+  # Jackett is auto-pointed at it (http://127.0.0.1:8191) by vt.py so protected
+  # indexers (1337x, torlock, glodls, ext, …) work. Chromium is RAM-hungry; it's
+  # capped and runs with media disabled so it can't take the box down.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: vpntorrent-flaresolverr
+    depends_on:
+      - vpntorrent
+    network_mode: "service:vpntorrent"     # share the VPN namespace
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - HEADLESS=true
+      - DISABLE_MEDIA=true     # skip image/media loads in Chromium -> less RAM/CPU
+      - TZ=${TZ:-America/Phoenix}
+    mem_limit: 1g              # isolate OOM to this container on the RAM-tight box
+    volumes:
+      - ./jackett-resolv.conf:/etc/resolv.conf:ro   # DNS through the tunnel
+    restart: unless-stopped
+
+  # Malware scanner (ClamAV). Scans newly-finished downloads ON DEMAND (no
+  # resident daemon — low RAM), quarantines threats + risky non-media files to
+  # /downloads/.quarantine, and writes /config/clamav/results.json that the app
+  # reads for the Library scan badges. It does its OWN scanning (the app can't
+  # reach it — the VPN container's DNS is hijacked to the tunnel), so no app↔AV
+  # network link is needed. Trusted component: runs as root to read/move files;
+  # on the normal bridge so freshclam can update signatures.
+  clamav:
+    build: ./clamav
+    image: vpntorrent-clamav:local
+    container_name: vpntorrent-clamav
+    user: "0:0"
+    # The base image's healthcheck pings the clamd daemon, which we intentionally
+    # don't run (on-demand clamscan keeps RAM low) — disable it so it's not "unhealthy".
+    healthcheck:
+      disable: true
+    mem_limit: 2g            # clamscan loads the sig DB (~1.3G) only while scanning
+    environment:
+      - TZ=${TZ:-America/Phoenix}
+    volumes:
+      - ${MEDIA_PATH}:/downloads     # rw: to move threats to .quarantine
+      - ./config:/config                              # write results.json the app reads
+      - clamav-db:/var/lib/clamav                     # persist the signature DB
+    restart: unless-stopped
+
+  # Sandboxed media decoder. The app proxies /play here so ffmpeg never runs in
+  # the privileged VPN container. Locked down hard: no capabilities, read-only
+  # root, non-root, no-new-privileges, /downloads READ-ONLY, and on an INTERNAL
+  # network with NO internet. A malicious media file that exploits a decoder bug
+  # is trapped here — it can't reach the network, the VPN keys, or anything else.
+  transcoder:
+    image: vpntorrent          # reuse the main image (has ffmpeg + library.py)
+    container_name: vpntorrent-transcoder
+    depends_on:
+      - vpntorrent
+    # Override the image ENTRYPOINT (entrypoint.sh brings up WireGuard then execs
+    # vt.py). Compose `command:` only replaces CMD, NOT ENTRYPOINT, so without this
+    # the sandbox would run the VPN bootstrap + main app instead of the decoder.
+    entrypoint: ["python3", "/app/transcoder.py"]
+    command: []
+    user: "65534:65534"        # nobody:nogroup
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 64
+    mem_limit: 1g
+    environment:
+      - HOME=/tmp
+      - PYTHONDONTWRITEBYTECODE=1
+      - SAVE_PATH=/downloads
+    volumes:
+      - ${MEDIA_PATH}:/downloads:ro  # READ-ONLY input
+    networks:
+      sandbox:
+        ipv4_address: ${TRANSCODER_IP:-172.24.9.2}
+    restart: unless-stopped
+
+# ZimaOS / CasaOS dashboard metadata (ignored by `docker compose`; read by the
+# dashboard so the tile opens http://<hostname>:<port_map>). hostname is the
+# Tailscale IP so the tile works when you're remote, matching the other apps.
+x-casaos:
+  architectures:
+    - amd64
+  main: vpntorrent
+  hostname: ${HOST_IP:-127.0.0.1}
+  port_map: "${WEB_PORT:-8722}"
+  scheme: http
+  index: /
+  is_uncontrolled: false
+  author: self
+  developer: self
+  category: Downloader
+  store_app_id: vpntorrent
+  icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0IiBmaWxsPSJub25lIj48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxMiIgZmlsbD0iIzIzODYzNiIvPjxwYXRoIGQ9Ik0zMiAxMGwxNiA2djEyYzAgMTEtNyAxOC0xNiAyMi05LTQtMTYtMTEtMTYtMjJWMTZsMTYtNnoiIGZpbGw9IndoaXRlIiBmaWxsLW9wYWNpdHk9IjAuMTUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMi41IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTTMyIDIydjE1TTI0IDMxbDggOCA4LTgiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+"
+  title:
+    custom: vpntorrent
+    en_us: vpntorrent
+  tagline:
+    en_us: Private, VPN-locked torrent downloader
+  description:
+    en_us: Download-only torrent client fused with ProtonVPN (WireGuard). Never seeds; nothing downloads unless the VPN is connected.
+
+networks:
+  # Isolated network for the decoder sandbox. `internal: true` => NO internet
+  # (and no gateway, so joining it doesn't add a default route that could break
+  # the wg killswitch). Subnet is inside 172.16/12, which the entrypoint already
+  # routes via the main table, so vpntorrent can still reach 172.31.9.2.
+  sandbox:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${SANDBOX_SUBNET:-172.24.9.0/24}
+
+volumes:
+  clamav-db:        # persists the ClamAV signature DB across restarts
