@@ -12,7 +12,7 @@ services:
     environment:
       - PORT=8722          # web UI port (kept identical inside & out so the
                            # ZimaOS dashboard tile always resolves correctly)
-      - VT_PASSWORD=${VT_PASSWORD:-changeme}   # set in .env (the installer writes it)
+      - VT_PASSWORD=${VT_PASSWORD:-}   # set in .env; if blank the app auto-generates a strong one (never a known default)
       - TMDB_API_KEY=${TMDB_API_KEY:-}   # <-- optional: a free TMDB API key enables poster art +
                            # descriptions in the Library tab. Get one at
                            # themoviedb.org/settings/api. Leave blank to skip.

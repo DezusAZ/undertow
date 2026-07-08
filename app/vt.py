@@ -12,6 +12,7 @@ Pure stdlib HTTP server + libtorrent engine. Traffic is bound to the VPN IP, so
 even if the killswitch ever failed, the engine has no non-VPN address to use.
 """
 import os
+import re
 import json
 import time
 import hmac
@@ -60,7 +61,8 @@ if not PASSWORD:                       # no password set -> make one so we're ne
         pass
     print(f"[vpntorrent] generated web password: {PASSWORD}  (change it in {PW_FILE})",
           flush=True)
-_sessions = set()                      # valid session tokens (in-memory)
+_sessions = {}                         # token -> expiry epoch (in-memory)
+_SESSION_TTL = 604800                  # 7 days, matches the cookie Max-Age
 
 # --- stream tokens ---------------------------------------------------------
 # Let an external player (VLC on your phone/laptop/TV) fetch a file over Tailscale
@@ -238,6 +240,8 @@ def add_magnet(magnet, cat):
 
 
 def remove(ih, delete_files=False):
+    if not re.fullmatch(r'[0-9a-fA-F]{40,64}', ih or ''):   # only real info-hashes touch the fs
+        return
     with _lock:
         t = _torrents.pop(ih, None)
     if t is not None:
@@ -1175,7 +1179,8 @@ class H(BaseHTTPRequestHandler):
         return ""
 
     def _authed(self):
-        return self._token() in _sessions
+        exp = _sessions.get(self._token())
+        return bool(exp and exp > time.time())
 
     def _ih(self):
         return (parse_qs(urlparse(self.path).query).get("ih") or [""])[0]
@@ -1233,11 +1238,17 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         if path == "/login":
-            n = int(self.headers.get("Content-Length", 0))
+            try: n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError: n = -1
+            if not (0 <= n <= 65536):
+                self._send(400, "bad request", "text/plain"); return
             pw = (parse_qs(self.rfile.read(n).decode()).get("pw") or [""])[0]
             if PASSWORD and hmac.compare_digest(pw, PASSWORD):
                 tok = secrets.token_hex(16)
-                _sessions.add(tok)
+                now = time.time()                        # prune expired tokens, then register
+                for t in [t for t, e in _sessions.items() if e <= now]:
+                    _sessions.pop(t, None)
+                _sessions[tok] = now + _SESSION_TTL
                 self._redirect("/", [("Set-Cookie",
                     f"vt_session={tok}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800")])
             else:
@@ -1245,7 +1256,7 @@ class H(BaseHTTPRequestHandler):
                 self._redirect("/login?e=1")
             return
         if path == "/logout":
-            _sessions.discard(self._token())
+            _sessions.pop(self._token(), None)
             self._redirect("/login", [("Set-Cookie",
                 "vt_session=; HttpOnly; Path=/; Max-Age=0")])
             return
@@ -1256,7 +1267,10 @@ class H(BaseHTTPRequestHandler):
             if not vpn_ok:
                 self._send(403, "VPN not connected — downloads disabled")
                 return
-            n = int(self.headers.get("Content-Length", 0))
+            try: n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError: n = -1
+            if not (0 <= n <= 65536):
+                self._send(400, "bad request", "text/plain"); return
             data = parse_qs(self.rfile.read(n).decode())
             magnet = (data.get("magnet") or [""])[0].strip()
             cat = (data.get("cat") or ["other"])[0].strip()

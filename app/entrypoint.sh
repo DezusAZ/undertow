@@ -22,6 +22,26 @@ if [ -f "$CONF" ]; then
     WORK=/tmp/wg.conf
     grep -vi '^[[:space:]]*dns' "$CONF" > "$WORK"
 
+    # --- KILL-SWITCH (fail-closed) --- set up BEFORE wg-quick so there is never a leak window,
+    # and it REMAINS if wg-quick fails, so the app can NEVER reach the internet off-tunnel.
+    # Default-DROP egress except: loopback, the WireGuard endpoint (so the tunnel can connect),
+    # the wg tunnel itself, and private LAN (web UI). IPv6 egress is fully blocked (WG is v4 here,
+    # so any v6 route would be a real-IP leak). Allows are best-effort; the DROP is hard.
+    EP=$(grep -i '^[[:space:]]*Endpoint' "$CONF" | head -1 | sed 's/.*=[[:space:]]*//')
+    EP_IP=${EP%:*}
+    iptables -F OUTPUT 2>/dev/null || true
+    iptables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o wg -j ACCEPT 2>/dev/null || true
+    if [ -n "$EP_IP" ]; then iptables -A OUTPUT -d "$EP_IP" -p udp -j ACCEPT 2>/dev/null || true; fi
+    for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8 100.64.0.0/10; do
+        iptables -A OUTPUT -d "$net" -j ACCEPT 2>/dev/null || true
+    done
+    iptables -P OUTPUT DROP
+    ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+    ip6tables -P OUTPUT DROP 2>/dev/null || true
+    echo "[vpntorrent] kill-switch armed (egress locked to tunnel + VPN endpoint + LAN; v6 blocked)"
+
     if wg-quick up "$WORK"; then
         VPN_IP=$(ip -4 addr show wg | awk '/inet /{print $2}' | cut -d/ -f1)
         if [ -n "$DNS_SRV" ]; then
