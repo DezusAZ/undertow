@@ -9,6 +9,12 @@ services:
       - /dev/net/tun
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1   # required for the wg-quick killswitch
+      # Disable IPv6 entirely (WG here is v4-only) so there is no v6 stack to leak
+      # your real IP through, regardless of ip6tables state. Verified accepted here.
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    mem_limit: 2g            # the heaviest service (libtorrent caches); cap so a spike
+                             # can't OOM the box. Re-apply in apply-mem-caps.sh on recreate.
     environment:
       - PORT=8722          # web UI port (kept identical inside & out so the
                            # ZimaOS dashboard tile always resolves correctly)
@@ -17,14 +23,21 @@ services:
                            # descriptions in the Library tab. Get one at
                            # themoviedb.org/settings/api. Leave blank to skip.
       - TRANSCODER_URL=http://${TRANSCODER_IP:-172.24.9.2}:8723   # decoder sandbox
+      - SEARX_URL=http://127.0.0.1:8080   # self-hosted SearXNG (shares this VPN namespace)
+      - BITMAGNET_URL=http://127.0.0.1:3333   # self-hosted DHT crawler (torznab)
+      - NEWZNAB_URL=${NEWZNAB_URL:-}       # Usenet indexer (NZBGeek Newznab) — set in .env
+      - NZBGEEK_APIKEY=${NZBGEEK_APIKEY:-}
+      - SAB_URL=${SAB_URL:-http://127.0.0.1:8085}   # SABnzbd download client
+      - SAB_APIKEY=${SAB_APIKEY:-}
     ports:
       - "${WEB_PORT:-8722}:8722"   # web UI -> http://<host>:${WEB_PORT}
     volumes:
       - ./config:/config                              # drop proton.conf here
       - ${MEDIA_PATH}:/downloads     # 11TB drive: movies/tv/music/...
+      - ${TRANSCODE_CACHE:-/DATA/transcode-cache}:/cache:ro   # serve prepared seekable MP4s
       - ./jackett-config:/jackett:ro                  # read Jackett's API key
     labels:
-      icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0IiBmaWxsPSJub25lIj48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxMiIgZmlsbD0iIzIzODYzNiIvPjxwYXRoIGQ9Ik0zMiAxMGwxNiA2djEyYzAgMTEtNyAxOC0xNiAyMi05LTQtMTYtMTEtMTYtMjJWMTZsMTYtNnoiIGZpbGw9IndoaXRlIiBmaWxsLW9wYWNpdHk9IjAuMTUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMi41IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTTMyIDIydjE1TTI0IDMxbDggOCA4LTgiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+"
+      icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0IiBmaWxsPSJub25lIj48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNCIgZmlsbD0iIzBhMmIxYyIvPjxwYXRoIGQ9Ik0zMiA4IDUwIDE1djE2YzAgMTMtOSAyMi0xOCAyNi05LTQtMTgtMTMtMTgtMjZWMTVsMTgtN3oiIGZpbGw9InJnYmEoNTIsMjIxLDEyNSwuMTYpIiBzdHJva2U9IiM2OGYwYTYiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0zMiAyM3YxNk0yMyAzMi41bDkgOSA5LTkiIHN0cm9rZT0iIzY4ZjBhNiIgc3Ryb2tlLXdpZHRoPSIzLjQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPg=="
     restart: unless-stopped
     networks:
       default: {}        # internet (for the VPN bootstrap) + the bridge for siblings
@@ -71,6 +84,106 @@ services:
       - ./jackett-resolv.conf:/etc/resolv.conf:ro   # DNS through the tunnel
     restart: unless-stopped
 
+  # Self-hosted metasearch node (SearXNG). This is the "Sources / Deep" transport:
+  # it aggregates Google/Bing/Brave/DuckDuckGo/etc. and returns JSON, so the app can
+  # run open-directory dorks (intitle:"index of" …) that public engines block when
+  # scraped directly. Shares the VPN namespace so its upstream engine queries also
+  # exit through Proton. Reached by the app at http://127.0.0.1:8080 (not published
+  # to the host). JSON + limiter-off are set in ./searxng-config/settings.yml.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: vpntorrent-searxng
+    depends_on:
+      - vpntorrent
+    network_mode: "service:vpntorrent"     # share the VPN namespace
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8080/
+      - TZ=${TZ:-America/Phoenix}
+    volumes:
+      - ./searxng-config:/etc/searxng
+      - ./jackett-resolv.conf:/etc/resolv.conf:ro   # DNS through the tunnel
+    mem_limit: 1g            # capped on the RAM-tight box
+    restart: unless-stopped
+
+  # --- Self-hosted DHT crawler (bitmagnet) + its Postgres -------------------
+  # Crawls the BitTorrent DHT directly, harvesting infohashes that live only in
+  # the swarm — on no tracker site. Shares the VPN namespace, so ALL crawl traffic
+  # exits through Proton and is killswitch-protected (fails closed if the VPN drops).
+  # The app queries its Torznab endpoint at 127.0.0.1:3333. It WARMS UP over hours/
+  # days as it discovers torrents (an empty DB returns little at first). Memory-capped
+  # for the RAM-tight box — stop these two services if the box gets tight.
+  bitmagnet-postgres:
+    image: postgres:16-alpine
+    container_name: vpntorrent-bitmagnet-pg
+    # NOT in the VPN namespace: postgres has no external traffic (only bitmagnet talks
+    # to it, locally), so it doesn't need the tunnel — and keeping it OUT of the shared
+    # namespace means it can never be "orphaned" when vpntorrent restarts. It lives on
+    # the internal sandbox net at a fixed IP; bitmagnet (in the VPN ns, also on sandbox)
+    # reaches it there. This removes the stateful DB from the restart-fragile set.
+    networks:
+      sandbox:
+        ipv4_address: ${BITMAGNET_PG_IP:-172.24.9.4}
+    environment:
+      - POSTGRES_PASSWORD=bitmagnet
+      - POSTGRES_DB=bitmagnet
+      - PGUSER=postgres
+    volumes:
+      - bitmagnet-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d bitmagnet -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # WAL crash-recovery after a power loss can take a while on a spinning disk;
+      # don't count that against the health budget (or bitmagnet's dependency gate
+      # would fail the whole boot with no retry).
+      start_period: 180s
+    mem_limit: 640m
+    shm_size: 256m
+    restart: unless-stopped
+
+  bitmagnet:
+    image: ghcr.io/bitmagnet-io/bitmagnet:latest
+    container_name: vpntorrent-bitmagnet
+    depends_on:
+      bitmagnet-postgres:
+        condition: service_healthy
+    network_mode: "service:vpntorrent"     # crawl exits through Proton
+    environment:
+      - POSTGRES_HOST=${BITMAGNET_PG_IP:-172.24.9.4}   # postgres on the sandbox net (not this ns)
+      - POSTGRES_NAME=bitmagnet
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=bitmagnet
+      - TZ=${TZ:-America/Phoenix}
+    volumes:
+      - ./jackett-resolv.conf:/etc/resolv.conf:ro   # DNS through the tunnel
+    command: ["worker", "run", "--keys=http_server", "--keys=queue_server", "--keys=dht_crawler"]
+    mem_limit: 1200m
+    restart: unless-stopped
+
+  # Usenet download client (SABnzbd). The "download pipe" for Usenet: the app sends
+  # it an NZB, and it fetches the article parts from the Newshosting provider over
+  # SSL, repairs (PAR2), unpacks, and drops the finished file into the shared library
+  # folder — where ClamAV scans it and the sandbox player opens it, same as torrents.
+  # Shares the VPN namespace so all Usenet traffic exits through Proton and is
+  # killswitch-protected. Provider credentials live in ./sabnzbd-config (gitignored).
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: vpntorrent-sabnzbd
+    depends_on:
+      - vpntorrent
+    network_mode: "service:vpntorrent"     # share the VPN namespace (app reaches 127.0.0.1:8085)
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=${TZ:-America/Phoenix}
+    volumes:
+      - ./sabnzbd-config:/config
+      - ${MEDIA_PATH}:/downloads
+      - ./jackett-resolv.conf:/etc/resolv.conf:ro   # DNS through the tunnel
+    mem_limit: 1g
+    restart: unless-stopped
+
   # Malware scanner (ClamAV). Scans newly-finished downloads ON DEMAND (no
   # resident daemon — low RAM), quarantines threats + risky non-media files to
   # /downloads/.quarantine, and writes /config/clamav/results.json that the app
@@ -90,6 +203,9 @@ services:
     mem_limit: 2g            # clamscan loads the sig DB (~1.3G) only while scanning
     environment:
       - TZ=${TZ:-America/Phoenix}
+      # flag  = scan + flag threats but KEEP them for you to review/decide (default)
+      # quarantine = move threats into /downloads/.quarantine
+      - QUARANTINE_ACTION=${QUARANTINE_ACTION:-flag}
     volumes:
       - ${MEDIA_PATH}:/downloads     # rw: to move threats to .quarantine
       - ./config:/config                              # write results.json the app reads
@@ -120,17 +236,59 @@ services:
     security_opt:
       - "no-new-privileges:true"
     pids_limit: 64
-    mem_limit: 1g
+    mem_limit: 2g              # NVENC + a 4K prepare needs headroom
+    # GPU (A2000) for hardware decode/encode of 4K + exotic codecs. Verified NVENC works
+    # while KEEPING every containment property (non-root, no caps, no-new-privileges,
+    # read-only rootfs, no network, downloads read-only) — only a GPU decode surface is
+    # added; a malicious file still can't escape, exfiltrate, or persist.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
     environment:
       - HOME=/tmp
       - PYTHONDONTWRITEBYTECODE=1
       - SAVE_PATH=/downloads
+      - CACHE_DIR=/cache
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
     volumes:
-      - ${MEDIA_PATH}:/downloads:ro  # READ-ONLY input
+      - ${MEDIA_PATH}:/downloads:ro                        # READ-ONLY input
+      - ${TRANSCODE_CACHE:-/DATA/transcode-cache}:/cache   # prepared seekable MP4s (rw)
     networks:
       sandbox:
         ipv4_address: ${TRANSCODER_IP:-172.24.9.2}
     restart: unless-stopped
+
+  # Self-heal watchdog. Fixes the #1 restart hazard: the five network_mode:service
+  # siblings are orphaned on a DEAD namespace if vpntorrent restarts alone (OOM/crash)
+  # — Docker can't even restart them (they're bound to the old, gone sandbox id), so
+  # nothing re-attaches them. This tiny sidecar runs undertow-heal.sh every 60s and
+  # compose-RECREATES any orphaned/exited sibling so it rejoins the live namespace
+  # (a plain `docker restart` cannot — that was the old, broken heal). It has the
+  # compose plugin (docker:27-cli) and the project is bind-mounted at its REAL host
+  # path so compose's ./config relative binds resolve on the host daemon.
+  # Needs the Docker socket (root-equivalent — standard for this pattern).
+  watchdog:
+    image: docker:27-cli
+    container_name: vpntorrent-watchdog
+    restart: unless-stopped
+    environment:
+      # the endpoint the GPU-health flag certifies — must equal the app's ai.json url so
+      # the flag can't certify one Ollama while the app calls a different (CPU) one.
+      OLLAMA_URL: ${OLLAMA_URL:-http://192.168.1.50:11434}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # identity mount: same path inside as on the host, so `docker compose` bind
+      # paths (./jackett-config, ...) resolve to real host dirs for the daemon. Writable
+      # so the GPU fail-safe can publish config/gpu_health.json for the app to read.
+      - /DATA/projects/vpntorrent:/DATA/projects/vpntorrent
+    working_dir: /DATA/projects/vpntorrent
+    mem_limit: 128m
+    entrypoint: ["/bin/sh", "-c", "echo '[watchdog] started'; while true; do sh /DATA/projects/vpntorrent/undertow-heal.sh || true; sleep 15; done"]
 
 # ZimaOS / CasaOS dashboard metadata (ignored by `docker compose`; read by the
 # dashboard so the tile opens http://<hostname>:<port_map>). hostname is the
@@ -148,20 +306,20 @@ x-casaos:
   developer: self
   category: Downloader
   store_app_id: vpntorrent
-  icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0IiBmaWxsPSJub25lIj48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxMiIgZmlsbD0iIzIzODYzNiIvPjxwYXRoIGQ9Ik0zMiAxMGwxNiA2djEyYzAgMTEtNyAxOC0xNiAyMi05LTQtMTYtMTEtMTYtMjJWMTZsMTYtNnoiIGZpbGw9IndoaXRlIiBmaWxsLW9wYWNpdHk9IjAuMTUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMi41IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTTMyIDIydjE1TTI0IDMxbDggOCA4LTgiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+"
+  icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0IiBmaWxsPSJub25lIj48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNCIgZmlsbD0iIzBhMmIxYyIvPjxwYXRoIGQ9Ik0zMiA4IDUwIDE1djE2YzAgMTMtOSAyMi0xOCAyNi05LTQtMTgtMTMtMTgtMjZWMTVsMTgtN3oiIGZpbGw9InJnYmEoNTIsMjIxLDEyNSwuMTYpIiBzdHJva2U9IiM2OGYwYTYiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0zMiAyM3YxNk0yMyAzMi41bDkgOSA5LTkiIHN0cm9rZT0iIzY4ZjBhNiIgc3Ryb2tlLXdpZHRoPSIzLjQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPg=="
   title:
-    custom: vpntorrent
-    en_us: vpntorrent
+    custom: Undertow
+    en_us: Undertow
   tagline:
-    en_us: Private, VPN-locked torrent downloader
+    en_us: Beneath the surface — private, VPN-locked file discovery
   description:
-    en_us: Download-only torrent client fused with ProtonVPN (WireGuard). Never seeds; nothing downloads unless the VPN is connected.
+    en_us: Undertow searches where others can't — 99 torrent indexers, a self-hosted DHT crawler, open-directory crawling, papers, books, media and more, from one interface. VPN-locked and malware-scanned; nothing leaves the tunnel.
 
 networks:
   # Isolated network for the decoder sandbox. `internal: true` => NO internet
   # (and no gateway, so joining it doesn't add a default route that could break
   # the wg killswitch). Subnet is inside 172.16/12, which the entrypoint already
-  # routes via the main table, so vpntorrent can still reach 172.31.9.2.
+  # routes via the main table, so vpntorrent can still reach the transcoder (172.24.9.2).
   sandbox:
     internal: true
     ipam:
@@ -170,3 +328,4 @@ networks:
 
 volumes:
   clamav-db:        # persists the ClamAV signature DB across restarts
+  bitmagnet-pg:     # persists the bitmagnet DHT-crawl database
