@@ -657,10 +657,43 @@ def probe_vcodec(path):
 # itself (h264/hevc/vp9/av1) is REMUXED (container swap, no re-encode) so YOUR machine's
 # GPU decodes it — zero server transcode. Only exotic codecs get a GPU (NVENC) re-encode.
 CACHE_DIR = os.environ.get("CACHE_DIR", "/cache")
-_BROWSER_VCODECS = {"h264", "hevc", "vp9", "av1"}      # client can decode these directly
+# Video codecs a BROWSER can actually decode, so we can remux instead of re-encoding.
+# HEVC is deliberately NOT here: Safari plays it, but Chrome and Firefox generally do
+# not, so copying an HEVC stream into an mp4 produced a file that played audio with a
+# black picture. x265 rips are extremely common, so this hit most downloads.
+_BROWSER_VCODECS = {"h264", "vp9", "av1"}              # client can decode these directly
 # audio we can safely COPY into mp4 for cross-browser playback. ac3/eac3/multichannel-aac
 # play silently in Chrome/Firefox, so those are transcoded to stereo aac instead.
 _BROWSER_ACODECS = {"aac", "mp3"}
+# H.264 encoder selection. NVENC is much cheaper on CPU, but it exists only on NVIDIA
+# hosts AND cannot encode 10-bit at all ("10 bit encode not supported"), so every
+# encode forces 8-bit yuv420p and every caller can fall back to libx264.
+_NVENC_OK = None
+
+
+def _have_nvenc():
+    global _NVENC_OK
+    if _NVENC_OK is None:
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 timeout=20).stdout.decode("utf-8", "replace")
+            _NVENC_OK = "h264_nvenc" in out
+        except Exception:
+            _NVENC_OK = False
+    return _NVENC_OK
+
+
+def _venc_args(gpu):
+    """H.264 encoder args. yuv420p is mandatory: NVENC refuses 10-bit outright, and
+    libx264 would happily emit High 10, which no browser can decode."""
+    if gpu:
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "23", "-b:v", "0",
+                "-profile:v", "high", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-profile:v", "high", "-pix_fmt", "yuv420p"]
+
+
 _CACHE_CAP_BYTES = int(os.environ.get("CACHE_CAP_GB", "80")) * 1024 * 1024 * 1024
 _PREP_STALL_SECS = int(os.environ.get("PREP_STALL_SECS", "900"))   # kill a prep making no progress
 _KEY_RE = re.compile(r"^[0-9a-f]{20}$")
@@ -755,14 +788,16 @@ def _prep_worker(real, key, dur):
         vcodec = probe_vcodec(real)
         acodec = _probe_acodec(real)
         achan = _probe_achannels(real)
+        use_gpu = _have_nvenc()
         if vcodec in _BROWSER_VCODECS:
             pre, vmap, mode = [], ["-c:v", "copy"], "remux"          # client-side decode
-            if vcodec == "hevc":
-                vmap += ["-tag:v", "hvc1"]                           # Safari needs hvc1, not hev1
         else:
-            pre = ["-hwaccel", "cuda"]                               # GPU decode + encode
-            vmap = ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "23", "-b:v", "0"]
-            mode = "gpu-transcode"
+            # Re-encode to H.264. -hwaccel cuda decodes on the GPU when we have one;
+            # _venc_args pins 8-bit yuv420p either way (NVENC cannot do 10-bit, and
+            # libx264 would otherwise emit High 10 — both give a black picture).
+            pre = ["-hwaccel", "cuda"] if use_gpu else []
+            vmap = _venc_args(use_gpu)
+            mode = "gpu-transcode" if use_gpu else "cpu-transcode"
         # copy audio only if it's stereo/mono aac|mp3; ac3/eac3/multichannel play silently
         # in Chrome/Firefox, so downmix those to stereo aac.
         if acodec in _BROWSER_ACODECS and 0 < achan <= 2:
@@ -774,7 +809,22 @@ def _prep_worker(real, key, dur):
                 "-progress", "pipe:1", "-protocol_whitelist", "file,pipe"]
                + pre + ["-i", real] + vmap + amap
                + ["-dn", "-sn", "-movflags", "+faststart", "-f", "mp4", "-y", tmp])
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # stderr is CAPTURED, not discarded: swallowing it is what hid
+        # "[h264_nvenc] 10 bit encode not supported" and turned a hard encoder failure
+        # into a silent black-video file.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        _err_tail = []
+        def _drain_err(pipe, sink):
+            try:
+                for ln in pipe:
+                    ln = ln.decode("utf-8", "replace").rstrip()
+                    if ln:
+                        sink.append(ln)
+                        del sink[:-12]        # keep only the last few lines
+            except Exception:
+                pass
+        threading.Thread(target=_drain_err, args=(proc.stderr, _err_tail),
+                         daemon=True).start()
         # watchdog: kill a prep whose output stops growing for _PREP_STALL_SECS (a hung
         # decode emits no -progress AND doesn't grow the .part) so it can't pin a thread.
         stop_wd = threading.Event()
@@ -810,11 +860,46 @@ def _prep_worker(real, key, dur):
             os.replace(tmp, out)
             _write_status(key, {"state": "ready", "progress": 100, "mode": mode})
         else:
+            why = " | ".join(_err_tail[-4:]) if _err_tail else "no error output"
+            print("[library] prepare failed (%s) for %s: %s"
+                  % (mode, os.path.basename(real), why[:400]), flush=True)
             try:
                 os.remove(tmp)
             except OSError:
                 pass
-            _write_status(key, {"state": "error", "mode": mode})
+            # A GPU encode can fail for reasons CPU encoding handles fine (unsupported
+            # pixel format, GPU busy, driver hiccup, no encode session free). Retry once
+            # in software rather than telling the user their file is broken.
+            retried = False
+            if use_gpu and mode == "gpu-transcode":
+                print("[library] retrying %s with the CPU encoder"
+                      % os.path.basename(real), flush=True)
+                _write_status(key, {"state": "preparing", "progress": 0,
+                                    "mode": "cpu-transcode"})
+                cpu_cmd = (["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                            "-protocol_whitelist", "file,pipe", "-i", real]
+                           + _venc_args(False) + amap
+                           + ["-dn", "-sn", "-movflags", "+faststart",
+                              "-f", "mp4", "-y", tmp])
+                try:
+                    r2 = subprocess.run(cpu_cmd, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.PIPE)
+                    if r2.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                        os.replace(tmp, out)
+                        _write_status(key, {"state": "ready", "progress": 100,
+                                            "mode": "cpu-transcode"})
+                        retried = True
+                    else:
+                        print("[library] cpu retry also failed: %s"
+                              % r2.stderr.decode("utf-8", "replace")[-300:], flush=True)
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
+                except Exception as e:
+                    print("[library] cpu retry error: %s" % e, flush=True)
+            if not retried:
+                _write_status(key, {"state": "error", "mode": mode, "error": why[:160]})
     except Exception as e:
         try:
             os.remove(tmp)
@@ -1081,10 +1166,12 @@ def transcode_file(handler, path):
             vfilter = []
             vmap = ["-c:v", "copy"]
         else:
-            # Re-encode: cap to 720p and use low-latency ultrafast x264.
+            # Re-encode: cap to 720p, low latency. -pix_fmt yuv420p is REQUIRED —
+            # without it a 10-bit source (any Main 10 / x265 rip) yields H.264 High 10,
+            # which browsers cannot decode: audio plays over a black picture.
             vfilter = ["-vf", "scale=-2:720"]
             vmap = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                    "-tune", "zerolatency", "-g", "48"]
+                    "-tune", "zerolatency", "-g", "48", "-pix_fmt", "yuv420p"]
         amap = ["-c:a", "aac", "-ac", "2", "-b:a", "160k"]
 
         # Hardening: -protocol_whitelist file,pipe stops a malicious input file from
