@@ -209,7 +209,7 @@ namespace — the watchdog repairs that automatically, but restarting the stack 
 
 ## Licence & disclaimer
 
-Provided as-is, with no warranty of any kind, including no warranty that it will keep
+MIT — see [LICENSE](LICENSE). Provided as-is, with no warranty of any kind, including no warranty that it will keep
 you anonymous. Verify your own setup with `./verify-anonymity.sh`, keep your VPN
 subscription active, and understand the law where you live. You are responsible for what
 you download.

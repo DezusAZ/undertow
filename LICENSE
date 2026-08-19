@@ -1,0 +1,39 @@
+MIT License
+
+Copyright (c) 2026 DezusAZ
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+ADDITIONAL NOTICE — READ BEFORE USING
+
+This software routes traffic through a VPN you supply. It is offered with NO
+WARRANTY THAT IT WILL KEEP YOU ANONYMOUS. Software fails, VPN providers log,
+subscriptions lapse, kernels change, and misconfiguration is easy. Verify your
+own installation with ./verify-anonymity.sh, and do not rely on this tool where
+exposure would cause you real harm.
+
+You alone are responsible for what you search for, download, and store. Hiding
+traffic from an ISP does not make unlawful activity lawful. Copyright, computer
+misuse, and privacy laws differ by country — know the rules where you live.
+
+Never share your VPN configuration file. It contains a private key that is your
+identity to the VPN provider, and traffic authenticated with it is attributable
+to you.
