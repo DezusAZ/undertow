@@ -2123,9 +2123,37 @@ function libPlay(idx, fileIdx){
   // Native container (mp4/webm/etc.): serve directly — byte-range seekable, your device decodes.
   if (f.native) { libMount(holder, tag, '/stream?id=' + encodeURIComponent(it.id) + '&f=' + f.i); return; }
   // Non-native (mkv/avi/…): PREPARE a seekable MP4 once (remux, or GPU transcode for exotic
+  // --- what can THIS browser actually decode? -------------------------------
+  // Asking beats assuming. Hardcoding "browsers play HEVC" was true for Safari and
+  // false for Chrome/Firefox, and the failure mode was a silent black picture. With a
+  // real answer the server can remux (seconds) instead of re-encoding (~25 minutes)
+  // whenever this browser can handle the original stream — and it keeps working when
+  // new codecs show up, because we just ask about those too.
+  var _libCaps = null;
+  function libCaps(){
+    if (_libCaps !== null) return _libCaps;
+    var v = document.createElement('video');
+    function can(mime){
+      try {
+        // MediaSource is what the player actually feeds; fall back to the element.
+        if (window.MediaSource && MediaSource.isTypeSupported(mime)) return true;
+      } catch(e){}
+      try { return v.canPlayType(mime) === 'probably'; } catch(e){ return false; }
+    }
+    var out = [];
+    // HEVC Main (8-bit) and Main 10 are separate capabilities: some devices decode
+    // 8-bit only, and a 10-bit remux there would black-screen exactly like before.
+    if (can('video/mp4; codecs="hvc1.1.6.L93.B0"'))  out.push('hevc');
+    if (can('video/mp4; codecs="hvc1.2.4.L120.B0"')) out.push('hevc10');
+    if (can('video/mp4; codecs="av01.0.05M.08"'))    out.push('av1');
+    if (can('video/mp4; codecs="vp09.00.10.08"'))    out.push('vp9');
+    _libCaps = out.join(',');
+    return _libCaps;
+  }
+
   // codecs), then play it with full seeking. Your browser decodes it on your own GPU.
   holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> Preparing for playback…</div>';
-  fetch('/prep?id=' + encodeURIComponent(it.id) + '&f=' + f.i).then(function(r){return r.json();}).then(function(d){
+  fetch('/prep?id=' + encodeURIComponent(it.id) + '&f=' + f.i + '&caps=' + encodeURIComponent(libCaps())).then(function(r){return r.json();}).then(function(d){
     if (!d || d.state === 'error' || !d.key) { holder.innerHTML = '<div class="lib-prep lib-prep-err">Couldn’t prepare this file. Try 📺 VLC / app below.</div>'; return; }
     if (d.state === 'ready') { libMount(holder, tag, '/playfile?key=' + encodeURIComponent(d.key)); return; }
     libPollPrep(holder, tag, d.key);
@@ -2255,10 +2283,11 @@ tick();setInterval(tick,1500);refreshAi();
 PAGE = PAGE.replace("__SAVE__", SAVE).replace("__OPTS__", OPTS)
 
 
-def _transcoder_prepare(abspath):
+def _transcoder_prepare(abspath, caps=""):
     """Ask the sandbox to PREPARE a seekable MP4 (remux for browser codecs, GPU NVENC for
     exotic). Returns {"key","state"} — the app then serves /playfile?key=... with ranges."""
-    url = TRANSCODER + "/prepare?path=" + quote(abspath)
+    url = (TRANSCODER + "/prepare?path=" + quote(abspath)
+           + "&caps=" + quote(caps or ""))
     try:
         return json.load(urllib.request.urlopen(url, timeout=20))
     except Exception:
@@ -2398,8 +2427,12 @@ class H(BaseHTTPRequestHandler):
             elif path == "/stream":
                 library.stream_file(self, p)      # raw bytes (no decode) — safe here
             elif path == "/prep":
-                # ask the sandbox to PREPARE a seekable MP4 (remux / GPU transcode)
-                self._send(200, json.dumps(_transcoder_prepare(p)), "application/json")
+                # Ask the sandbox to PREPARE a seekable MP4. The player sends what it can
+                # decode so we remux (seconds) instead of re-encoding (~25 min) whenever
+                # this browser can handle the original video.
+                caps = (parse_qs(urlparse(self.path).query).get("caps") or [""])[0]
+                self._send(200, json.dumps(_transcoder_prepare(p, caps)),
+                           "application/json")
             else:
                 proxy_transcode(self, p)          # legacy live decode in the sandbox
         elif path == "/playfile":

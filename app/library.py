@@ -736,14 +736,59 @@ def _probe_duration(path):
         return 0.0
 
 
-def cache_key(real_path):
-    """Deterministic id for a source file (path+mtime+size) so replays hit the cache."""
+def cache_key(real_path, mode="transcode"):
+    """Deterministic id for a prepared artifact (source identity + how it was prepared).
+
+    The MODE is part of the key on purpose: the same film prepared as a remux (HEVC left
+    intact, for a browser that can decode it) is NOT interchangeable with the H.264
+    transcode a different browser needs. Keying on the file alone would hand one
+    browser the other's artifact and play audio over a black screen.
+    """
     try:
         st = os.stat(real_path)
     except OSError:
         return None
-    raw = "%s|%d|%d" % (real_path, st.st_mtime_ns, st.st_size)
+    raw = "%s|%d|%d|%s" % (real_path, st.st_mtime_ns, st.st_size, mode)
     return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:20]
+
+
+def _probe_pixfmt(path):
+    # NB: _ffprobe1 wants the full "stream=<field>" form. Passing a bare field name
+    # returns "" silently, which would make every 10-bit file look 8-bit and get
+    # remuxed to browsers that cannot decode it — the exact black-screen bug again.
+    return (_ffprobe1(path, "stream=pix_fmt", "v:0") or "").strip().lower()
+
+
+def _is_10bit(pix_fmt):
+    return "10" in pix_fmt or "12" in pix_fmt        # yuv420p10le, p010le, ...
+
+
+def plan_playback(real_path, caps):
+    """Decide how to deliver this file to THIS client.
+
+    `caps` is what the browser told us it can decode (see the player's probe). Remuxing
+    is near-instant; transcoding a 2-hour film takes ~25 minutes. So we remux whenever
+    the client can genuinely decode the source, and only re-encode when it cannot.
+
+    This replaces a hardcoded "browsers can play HEVC" assumption that was wrong for
+    Chrome and Firefox and produced silent black video. Asking the client is both
+    faster for capable browsers (Safari, Chrome/Edge with hardware HEVC) and correct
+    for the rest — and it keeps working when new codecs appear.
+
+    Returns "remux" or "transcode".
+    """
+    have = set(x for x in (caps or "").lower().replace(" ", "").split(",") if x)
+    vcodec = (probe_vcodec(real_path) or "").lower()
+    tenbit = _is_10bit(_probe_pixfmt(real_path))
+
+    if vcodec == "h264":
+        # High 10 exists in the wild and no browser decodes it.
+        return "transcode" if tenbit else "remux"
+    if vcodec == "hevc":
+        return "remux" if ("hevc10" if tenbit else "hevc") in have else "transcode"
+    if vcodec in ("vp9", "av1"):
+        return "remux" if vcodec in have else "transcode"
+    return "transcode"                                # mpeg4, vc1, wmv3, ...
 
 
 def _status_path(key):
@@ -782,15 +827,20 @@ def read_status(key):
     return d
 
 
-def _prep_worker(real, key, dur):
+def _prep_worker(real, key, dur, plan="transcode"):
     out, tmp = _out_path(key), _out_path(key) + ".part"
     try:
         vcodec = probe_vcodec(real)
         acodec = _probe_acodec(real)
         achan = _probe_achannels(real)
         use_gpu = _have_nvenc()
-        if vcodec in _BROWSER_VCODECS:
-            pre, vmap, mode = [], ["-c:v", "copy"], "remux"          # client-side decode
+        if plan == "remux":
+            # The CLIENT told us it can decode this video, so ship the original stream
+            # untouched — seconds instead of half an hour. hvc1 tagging matters because
+            # Safari rejects the hev1 flavour inside mp4.
+            pre, vmap, mode = [], ["-c:v", "copy"], "remux"
+            if vcodec == "hevc":
+                vmap += ["-tag:v", "hvc1"]
         else:
             # Re-encode to H.264. -hwaccel cuda decodes on the GPU when we have one;
             # _venc_args pins 8-bit yuv420p either way (NVENC cannot do 10-bit, and
@@ -912,10 +962,17 @@ def _prep_worker(real, key, dur):
         _cache_sweep()
 
 
-def prepare_to_cache(real_path):
+def prepare_to_cache(real_path, caps=""):
     """Kick off (or reuse) preparation of a seekable MP4 for `real_path`. Returns
-    {"key", "state"}; poll read_status(key) until 'ready', then serve cache_file(key)."""
-    key = cache_key(real_path)
+    {"key", "state"}; poll read_status(key) until 'ready', then serve cache_file(key).
+
+    `caps` is the calling browser's decode capability list; it decides whether we can
+    get away with a fast remux or must re-encode."""
+    try:
+        mode = plan_playback(real_path, caps)
+    except Exception:
+        mode = "transcode"                          # unknown source -> the safe path
+    key = cache_key(real_path, mode)
     if not key:
         return {"state": "error"}
     if os.path.exists(_out_path(key)):
@@ -926,7 +983,8 @@ def prepare_to_cache(real_path):
         _prep_jobs[key] = True
     dur = _probe_duration(real_path)
     try:
-        threading.Thread(target=_prep_worker, args=(real_path, key, dur), daemon=True).start()
+        threading.Thread(target=_prep_worker, args=(real_path, key, dur, mode),
+                         daemon=True).start()
     except Exception:                              # never leak the _prep_jobs slot
         with _prep_lock:
             _prep_jobs.pop(key, None)

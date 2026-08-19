@@ -13,6 +13,7 @@ which is stdlib-only and imports no libtorrent.
 """
 import os
 import json
+import re
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -59,13 +60,18 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
         if u.path == "/prepare":
-            # PREPARE a seekable MP4 (remux for browser codecs, GPU NVENC for exotic).
+            # PREPARE a seekable MP4. `caps` is the calling browser's decode capability
+            # list, which decides remux (fast) vs re-encode (slow but universal).
             path = (qs.get("path") or [""])[0]
+            caps = (qs.get("caps") or [""])[0]
+            # Untrusted input that only ever gets membership-tested, but keep it to a
+            # short, boring charset anyway.
+            caps = re.sub(r"[^a-z0-9,]", "", caps.lower())[:120]
             real = _safe(path) if path else None
             if not real:
                 self._json({"state": "error", "error": "not found"}, 404)
                 return
-            self._json(library.prepare_to_cache(real))
+            self._json(library.prepare_to_cache(real, caps))
         elif u.path == "/prepstatus":
             self._json(library.read_status((qs.get("key") or [""])[0]))
         elif u.path == "/touch":
