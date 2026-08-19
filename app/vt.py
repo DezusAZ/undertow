@@ -120,6 +120,22 @@ _SESSION_TTL = 604800                  # 7 days, matches the cookie Max-Age
 # threaded, so a per-request sleep runs in parallel across connections and throttles
 # nothing. Deliberately NOT a global concurrency cap — the same handler serves
 # long-lived media streams, and a global cap would let one movie stall the whole UI.
+# Extra origins the operator trusts (a reverse proxy / front door), comma-separated,
+# e.g. TRUSTED_ORIGINS=https://box.tailnet.ts.net:8723,http://192.168.1.10:8722
+TRUSTED_ORIGINS = set()
+for _o in (os.environ.get("TRUSTED_ORIGINS", "") or "").split(","):
+    _o = _o.strip().lower().rstrip("/")
+    if _o:
+        TRUSTED_ORIGINS.add(_o)
+        # also accept the bare host:port form so either spelling works
+        try:
+            _p = urlparse(_o)
+            if _p.netloc:
+                TRUSTED_ORIGINS.add(_p.netloc)
+        except Exception:
+            pass
+_csrf_seen = set()                     # distinct rejected origins already logged
+
 _LOGIN_FAILS = {}                      # ip -> [fail_count, window_start_epoch]
 _LOGIN_MAX = 5                         # failures allowed per window
 _LOGIN_WINDOW = 900                    # 15 minutes
@@ -2469,30 +2485,53 @@ class H(BaseHTTPRequestHandler):
     def _origin_ok(self):
         """Reject cross-origin state-changing requests (CSRF).
 
-        The session cookie is SameSite=Lax, but "same site" ignores the PORT: another
-        web app on this same host (http://host:8800) counts as same-site with
-        http://host:8722, so its pages could forge POSTs — /add, /remove,
-        /library/delete — with the user's cookie attached. Only Origin distinguishes
-        by port, so that is what we check.
+        The session cookie is SameSite=Lax, and "same site" ignores the PORT: another
+        web app on this same host (http://host:8800) is same-site with http://host:8722,
+        so its pages could forge POSTs — /add, /remove, /library/delete — with the
+        user's cookie attached. Only Origin distinguishes by port, so we compare Origin
+        against the host this request was actually addressed to.
+
+        Reverse proxies matter here: Undertow is normally reached through an HTTPS front
+        door (e.g. Tailscale Serve on :8723 -> 127.0.0.1:8722), which forwards the
+        original host in Host and/or X-Forwarded-Host. Both are accepted, plus any
+        origins the operator lists in TRUSTED_ORIGINS (comma-separated), so a different
+        front door can be allowed without weakening the port check.
 
         A missing Origin is allowed: browsers always send it on cross-origin POSTs,
-        while non-browser clients (curl, the installer's self-test) legitimately omit
-        it — and those aren't riding a victim's cookie.
+        while non-browser clients (curl, the installer's self-test) legitimately omit it
+        — and those are not riding a victim's cookie.
         """
         origin = self.headers.get("Origin")
         if not origin:
             return True
-        host = self.headers.get("Host") or ""
-        # Compare scheme+host+port. Behind the documented Tailscale-Serve HTTPS front
-        # door the browser's Origin is https://<name> while Host is the same name, so
-        # accept either scheme for an otherwise exact host match.
         try:
             p = urlparse(origin)
         except Exception:
-            return False
-        if p.scheme not in ("http", "https") or not p.netloc:
-            return False
-        return p.netloc == host
+            p = None
+        candidates = set()
+        for h in (self.headers.get("Host"), self.headers.get("X-Forwarded-Host")):
+            if h:
+                candidates.add(h.strip().lower())
+        for extra in TRUSTED_ORIGINS:
+            candidates.add(extra)
+        if p and p.scheme in ("http", "https") and p.netloc:
+            if p.netloc.lower() in candidates:
+                return True
+            # An operator may list a full origin ("https://host:8723") rather than a
+            # bare host; accept that spelling too.
+            if origin.strip().lower().rstrip("/") in candidates:
+                return True
+        # Rejected. Say exactly why, once per distinct origin — an unexplained 403 in
+        # the middle of a login is the worst possible failure mode.
+        key = (origin, self.headers.get("Host"))
+        if key not in _csrf_seen:
+            _csrf_seen.add(key)
+            print("[vpntorrent] csrf: refused Origin=%r Host=%r X-Forwarded-Host=%r path=%s\n"
+                  "             If this is your own front door, add it to TRUSTED_ORIGINS in .env"
+                  % (origin, self.headers.get("Host"),
+                     self.headers.get("X-Forwarded-Host"), urlparse(self.path).path),
+                  flush=True)
+        return False
 
     def do_POST(self):
         path = urlparse(self.path).path

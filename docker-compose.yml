@@ -39,6 +39,9 @@ services:
       - NZBGEEK_APIKEY=${NZBGEEK_APIKEY:-}
       - SAB_URL=${SAB_URL:-http://127.0.0.1:8085}   # SABnzbd download client
       - SAB_APIKEY=${SAB_APIKEY:-}
+      # Origins allowed to POST (CSRF). Your reverse-proxy / front-door URL goes here,
+      # comma-separated. Host and X-Forwarded-Host are always accepted automatically.
+      - TRUSTED_ORIGINS=${TRUSTED_ORIGINS:-}
     ports:
       - "${WEB_PORT:-8722}:8722"   # web UI -> http://<host>:${WEB_PORT}
     volumes:
