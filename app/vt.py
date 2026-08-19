@@ -2339,7 +2339,12 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
-        self.send_header("Referrer-Policy", "no-referrer")  # don't leak stream tokens via Referer
+        # "same-origin", NOT "no-referrer": under no-referrer browsers serialize the
+        # Origin header as the literal string "null" even for same-origin form posts,
+        # which made the CSRF check below refuse the app's own login page. same-origin
+        # still sends NO referrer to third parties (so media/stream tokens in URLs never
+        # leak off-site) while keeping Origin intact for our own requests.
+        self.send_header("Referrer-Policy", "same-origin")
         # Nothing here is ever meant to be framed; framing it is only useful for
         # clickjacking the download/delete controls.
         self.send_header("X-Frame-Options", "DENY")
@@ -2501,6 +2506,16 @@ class H(BaseHTTPRequestHandler):
         while non-browser clients (curl, the installer's self-test) legitimately omit it
         — and those are not riding a victim's cookie.
         """
+        # Sec-Fetch-Site is set by the browser itself and CANNOT be forged by page
+        # script, which makes it a stronger signal than Origin. "same-origin" means the
+        # request came from this very origin; "none" means the user typed the URL or
+        # used a bookmark. Both are safe. Note we deliberately do NOT accept
+        # "same-site": that is precisely the same-host-different-port case this check
+        # exists to block. This also covers browsers that send Origin: null.
+        sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if sfs in ("same-origin", "none"):
+            return True
+
         origin = self.headers.get("Origin")
         if not origin:
             return True
