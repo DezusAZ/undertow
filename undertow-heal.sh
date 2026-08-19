@@ -35,7 +35,7 @@ COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
 OLLAMA_CTR="${OLLAMA_CTR:-ollama-gpu}"
 # The endpoint the flag CERTIFIES — must equal the URL the app actually sends inference to
 # (config/ai.json url), else the gate could pass while inference runs on a different CPU box.
-OLLAMA_URL="${OLLAMA_URL:-http://192.168.1.50:11434}"
+OLLAMA_URL="${OLLAMA_URL:-}"    # set in .env if you run a local Ollama; never hardcode a LAN IP
 GPU_FLAG="$COMPOSE_DIR/config/gpu_health.json"
 GPU_STATE="$COMPOSE_DIR/config/.gpu_heal_state"     # "last_restart_epoch fail_count"
 # ollama-gpu runs ONLY while Undertow has an active hunt (user 2026-07-14: don't burn power

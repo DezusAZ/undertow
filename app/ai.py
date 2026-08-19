@@ -32,7 +32,9 @@ _cache_mtime = -1
 
 _DEFAULTS = {
     "enabled": False,
-    "url": os.environ.get("OLLAMA_URL", "http://192.168.1.50:11434"),
+    # No default server: local AI is opt-in, and a hardcoded LAN address would both be
+    # wrong on someone else's network and disclose the packager's topology.
+    "url": os.environ.get("OLLAMA_URL", ""),
     "model": os.environ.get("AI_MODEL", "mistral-7b:latest"),
 }
 
