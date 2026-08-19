@@ -1,8 +1,18 @@
+# Docker's default json-file log driver has NO size limit: every container writes an
+# ever-growing log until the disk fills and the whole box stops. That is one of the most
+# common ways a long-running self-hosted stack dies, so cap every service.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   vpntorrent:
     build: .
     image: vpntorrent
     container_name: vpntorrent
+    logging: *default-logging
     cap_add:
       - NET_ADMIN          # needed to bring up WireGuard + killswitch
     devices:
@@ -39,6 +49,17 @@ services:
     labels:
       icon: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0IiBmaWxsPSJub25lIj48cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNCIgZmlsbD0iIzBhMmIxYyIvPjxwYXRoIGQ9Ik0zMiA4IDUwIDE1djE2YzAgMTMtOSAyMi0xOCAyNi05LTQtMTgtMTMtMTgtMjZWMTVsMTgtN3oiIGZpbGw9InJnYmEoNTIsMjIxLDEyNSwuMTYpIiBzdHJva2U9IiM2OGYwYTYiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0zMiAyM3YxNk0yMyAzMi41bDkgOSA5LTkiIHN0cm9rZT0iIzY4ZjBhNiIgc3Ryb2tlLXdpZHRoPSIzLjQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPg=="
     restart: unless-stopped
+    # GATE FOR THE SHARED NAMESPACE. The five siblings below run *inside* this
+    # container's network namespace, so they must not exist until the kill-switch is
+    # actually live — otherwise they egress via the bridge and get SNATed to the real
+    # public IP (bitmagnet's DHT crawler starts 0.34s after its container does).
+    # We test the LIVE firewall policy, deliberately NOT a marker file: a file would
+    # survive an OOM kill and report "armed" for a container that never armed.
+    healthcheck:
+      test: ["CMD-SHELL", "iptables -S OUTPUT 2>/dev/null | head -1 | grep -qx -- '-P OUTPUT DROP'"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
     networks:
       default: {}        # internet (for the VPN bootstrap) + the bridge for siblings
       sandbox:           # reach the decoder sandbox at 172.24.9.2 (no DNS needed)
@@ -50,8 +71,11 @@ services:
   jackett:
     image: lscr.io/linuxserver/jackett:latest
     container_name: vpntorrent-jackett
+    logging: *default-logging
     depends_on:
-      - vpntorrent
+      vpntorrent:
+        # wait for the kill-switch to be live, not merely for the container to exist
+        condition: service_healthy
     network_mode: "service:vpntorrent"     # share the VPN namespace
     environment:
       - PUID=999
@@ -70,8 +94,11 @@ services:
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: vpntorrent-flaresolverr
+    logging: *default-logging
     depends_on:
-      - vpntorrent
+      vpntorrent:
+        # wait for the kill-switch to be live, not merely for the container to exist
+        condition: service_healthy
     network_mode: "service:vpntorrent"     # share the VPN namespace
     environment:
       - LOG_LEVEL=info
@@ -93,8 +120,11 @@ services:
   searxng:
     image: searxng/searxng:latest
     container_name: vpntorrent-searxng
+    logging: *default-logging
     depends_on:
-      - vpntorrent
+      vpntorrent:
+        # wait for the kill-switch to be live, not merely for the container to exist
+        condition: service_healthy
     network_mode: "service:vpntorrent"     # share the VPN namespace
     environment:
       - SEARXNG_BASE_URL=http://127.0.0.1:8080/
@@ -115,6 +145,7 @@ services:
   bitmagnet-postgres:
     image: postgres:16-alpine
     container_name: vpntorrent-bitmagnet-pg
+    logging: *default-logging
     # NOT in the VPN namespace: postgres has no external traffic (only bitmagnet talks
     # to it, locally), so it doesn't need the tunnel — and keeping it OUT of the shared
     # namespace means it can never be "orphaned" when vpntorrent restarts. It lives on
@@ -145,8 +176,13 @@ services:
   bitmagnet:
     image: ghcr.io/bitmagnet-io/bitmagnet:latest
     container_name: vpntorrent-bitmagnet
+    logging: *default-logging
     depends_on:
       bitmagnet-postgres:
+        condition: service_healthy
+      vpntorrent:
+        # was MISSING entirely: bitmagnet could start before vpntorrent existed, so its
+        # DHT crawler announced from the bridge address = the operator's real IP
         condition: service_healthy
     network_mode: "service:vpntorrent"     # crawl exits through Proton
     environment:
@@ -170,8 +206,11 @@ services:
   sabnzbd:
     image: lscr.io/linuxserver/sabnzbd:latest
     container_name: vpntorrent-sabnzbd
+    logging: *default-logging
     depends_on:
-      - vpntorrent
+      vpntorrent:
+        # wait for the kill-switch to be live, not merely for the container to exist
+        condition: service_healthy
     network_mode: "service:vpntorrent"     # share the VPN namespace (app reaches 127.0.0.1:8085)
     environment:
       - PUID=0
@@ -195,6 +234,7 @@ services:
     build: ./clamav
     image: vpntorrent-clamav:local
     container_name: vpntorrent-clamav
+    logging: *default-logging
     user: "0:0"
     # The base image's healthcheck pings the clamd daemon, which we intentionally
     # don't run (on-demand clamscan keeps RAM low) — disable it so it's not "unhealthy".
@@ -220,6 +260,7 @@ services:
   transcoder:
     image: vpntorrent          # reuse the main image (has ffmpeg + library.py)
     container_name: vpntorrent-transcoder
+    logging: *default-logging
     depends_on:
       - vpntorrent
     # Override the image ENTRYPOINT (entrypoint.sh brings up WireGuard then execs
@@ -237,24 +278,16 @@ services:
       - "no-new-privileges:true"
     pids_limit: 64
     mem_limit: 2g              # NVENC + a 4K prepare needs headroom
-    # GPU (A2000) for hardware decode/encode of 4K + exotic codecs. Verified NVENC works
-    # while KEEPING every containment property (non-root, no caps, no-new-privileges,
-    # read-only rootfs, no network, downloads read-only) — only a GPU decode surface is
-    # added; a malicious file still can't escape, exfiltrate, or persist.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, video]
+    # NOTE: hardware (NVENC) transcoding is OPTIONAL and lives in docker-compose.gpu.yml.
+    # It is not declared here on purpose: a `deploy.resources.reservations.devices:
+    # driver: nvidia` block makes `docker compose up` FAIL outright on any host without
+    # the NVIDIA container runtime, which is most machines. CPU transcoding works
+    # everywhere; install.sh detects an NVIDIA setup and layers the GPU overlay on.
     environment:
       - HOME=/tmp
       - PYTHONDONTWRITEBYTECODE=1
       - SAVE_PATH=/downloads
       - CACHE_DIR=/cache
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
     volumes:
       - ${MEDIA_PATH}:/downloads:ro                        # READ-ONLY input
       - ${TRANSCODE_CACHE:-/DATA/transcode-cache}:/cache   # prepared seekable MP4s (rw)
@@ -275,20 +308,27 @@ services:
   watchdog:
     image: docker:27-cli
     container_name: vpntorrent-watchdog
+    logging: *default-logging
     restart: unless-stopped
     environment:
       # the endpoint the GPU-health flag certifies — must equal the app's ai.json url so
       # the flag can't certify one Ollama while the app calls a different (CPU) one.
-      OLLAMA_URL: ${OLLAMA_URL:-http://192.168.1.50:11434}
+      # Empty by default: the local-AI feature is optional, and a hardcoded LAN address
+      # would be wrong (and would leak the packager's network layout) on anyone else's box.
+      OLLAMA_URL: ${OLLAMA_URL:-}
+      # so the heal script finds the project without a compiled-in path
+      COMPOSE_DIR: ${UNDERTOW_DIR:-${PWD}}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # identity mount: same path inside as on the host, so `docker compose` bind
       # paths (./jackett-config, ...) resolve to real host dirs for the daemon. Writable
       # so the GPU fail-safe can publish config/gpu_health.json for the app to read.
-      - /DATA/projects/vpntorrent:/DATA/projects/vpntorrent
-    working_dir: /DATA/projects/vpntorrent
+      # ${PWD} fallback keeps this working wherever the project is installed — a
+      # hardcoded path silently broke the watchdog on any other machine.
+      - ${UNDERTOW_DIR:-${PWD}}:${UNDERTOW_DIR:-${PWD}}
+    working_dir: ${UNDERTOW_DIR:-${PWD}}
     mem_limit: 128m
-    entrypoint: ["/bin/sh", "-c", "echo '[watchdog] started'; while true; do sh /DATA/projects/vpntorrent/undertow-heal.sh || true; sleep 15; done"]
+    entrypoint: ["/bin/sh", "-c", "echo '[watchdog] started'; while true; do sh \"$${COMPOSE_DIR}/undertow-heal.sh\" || true; sleep 15; done"]
 
 # ZimaOS / CasaOS dashboard metadata (ignored by `docker compose`; read by the
 # dashboard so the tile opens http://<hostname>:<port_map>). hostname is the
@@ -297,9 +337,16 @@ x-casaos:
   architectures:
     - amd64
   main: vpntorrent
-  hostname: ${HOST_IP:-127.0.0.1}
-  port_map: "${WEB_PORT:-8722}"
-  scheme: http
+  # NOTE (2026-08-16): the vpntorrent container runs on the VPN network, so its published
+  # port :8722 is only reachable via loopback (kernel DNAT over the Tailscale IP makes replies
+  # route out the VPN and time out). The tile therefore points at a Tailscale-Serve front door
+  # (https://<magicdns>:8723 -> 127.0.0.1:8722) instead of the raw IP. Do NOT revert to the IP.
+  # Set CASAOS_HOSTNAME in .env to the address YOUR browser uses to reach this box
+  # (a Tailscale MagicDNS name, a LAN IP, whatever). Left blank on a fresh install so
+  # nobody inherits the packager's hostname.
+  hostname: ${CASAOS_HOSTNAME:-}
+  port_map: "8723"
+  scheme: https
   index: /
   is_uncontrolled: false
   author: self

@@ -21,6 +21,18 @@ CONFIG = os.environ.get("CONFIG", "/config")        # results + seen state live 
 POLL = int(os.environ.get("POLL", "60"))            # seconds between sweeps
 SETTLE = int(os.environ.get("SETTLE", "90"))        # file must be unmodified this long before scanning
 
+# What to do when a file is infected or a risky executable:
+#   "flag"       -> DO NOT touch the file. Record it as "flagged" so the app warns
+#                   loudly, but keep it in place so the user can inspect it and
+#                   decide. (Default — the user asked to keep + decide.) The app
+#                   never EXECUTES downloads; media is only ever opened through the
+#                   network-isolated, no-exec sandbox decoder, so a kept-but-flagged
+#                   file is inert until the user acts on it.
+#   "quarantine" -> move the file into DOWNLOADS/.quarantine (old behavior).
+ACTION = os.environ.get("QUARANTINE_ACTION", "flag").strip().lower()
+if ACTION not in ("flag", "quarantine"):
+    ACTION = "flag"
+
 CATEGORIES = ["movies", "tv", "music", "documents", "software", "other"]
 
 STATE_DIR = os.path.join(CONFIG, "clamav")
@@ -192,6 +204,25 @@ def quarantine(file_abspath):
         return False
 
 
+def handle_threat(records, fp, reason, sig, handled):
+    """Deal with an infected/risky file per ACTION, then mark it handled so it is
+    not later recorded as clean. In "flag" mode the file is KEPT in place and just
+    recorded as "flagged"; in "quarantine" mode it is moved to .quarantine."""
+    if fp in handled:
+        return
+    if ACTION == "quarantine":
+        if quarantine(fp):
+            record(records, fp, "quarantined", reason, sig)
+        else:
+            # move failed -> file is still present; flag it so it isn't marked clean
+            record(records, fp, "flagged", reason, sig)
+    else:
+        record(records, fp, "flagged", reason, sig)
+        log("flagged (kept for review): %s [%s%s]"
+            % (rel_to_downloads(fp), reason, ((" " + sig) if sig else "")))
+    handled.add(fp)
+
+
 # --------------------------------------------------------------------------- #
 # Scanning
 # --------------------------------------------------------------------------- #
@@ -256,19 +287,17 @@ def scan_item(cat, path):
     can avoid marking the item seen and retry next sweep.
     """
     records = {}
-    quarantined = set()  # abspaths already moved
+    handled = set()  # abspaths already recorded as flagged/quarantined
 
     # Enumerate files once (snapshot).
     all_files = list(iter_files(path))
 
-    # (1) Risky-type quarantine (except in "software").
+    # (1) Risky executables (except in "software"): flag (kept) or quarantine.
     if cat != "software":
         for fp in all_files:
             ext = os.path.splitext(fp)[1].lower()
             if ext in RISKY_EXEC:
-                if quarantine(fp):
-                    record(records, fp, "quarantined", "executable", "")
-                    quarantined.add(fp)
+                handle_threat(records, fp, "executable", "", handled)
 
     # (2) ClamAV scan of the whole item in ONE invocation.
     scan_ok = True
@@ -280,23 +309,38 @@ def scan_item(cat, path):
         return records, scan_ok
 
     found = parse_found(out)
+    infected_recorded = 0
     for fp, sig in found.items():
-        if fp in quarantined:
+        if fp in handled:
             continue
-        # Only quarantine if still present.
         try:
             present = os.path.isfile(fp) and not os.path.islink(fp)
         except OSError:
             present = False
         if not present:
             continue
-        if quarantine(fp):
-            record(records, fp, "quarantined", "infected", sig)
-            quarantined.add(fp)
+        handle_threat(records, fp, "infected", sig, handled)
+        infected_recorded += 1
 
-    # (3) Everything still present and not quarantined -> clean.
+    # clamscan says infected (rc==1) but we couldn't attribute it to any file (e.g. a
+    # newline in a filename can break the ": <SIG> FOUND" line parse). FAIL SAFE: flag
+    # every file in the item rather than risk marking malware clean below.
+    if rc == 1 and infected_recorded == 0:
+        for fp in all_files:
+            if fp in handled:
+                continue
+            try:
+                still = os.path.isfile(fp) and not os.path.islink(fp)
+            except OSError:
+                still = False
+            if still:
+                handle_threat(records, fp, "infected", "Unattributed.Detection", handled)
+        log("clamscan rc=1 but no file attributed on %s: flagged the whole item"
+            % rel_to_downloads(path))
+
+    # (3) Everything still present and not flagged -> clean.
     for fp in all_files:
-        if fp in quarantined:
+        if fp in handled:
             continue
         try:
             still = os.path.isfile(fp) and not os.path.islink(fp)
@@ -307,8 +351,10 @@ def scan_item(cat, path):
         record(records, fp, "clean", "", "")
 
     n_clean = sum(1 for r in records.values() if r["verdict"] == "clean")
-    n_quar = sum(1 for r in records.values() if r["verdict"] == "quarantined")
-    log("scanned %s: %d clean, %d quarantined" % (rel_to_downloads(path), n_clean, n_quar))
+    n_threat = sum(1 for r in records.values()
+                   if r["verdict"] in ("flagged", "quarantined"))
+    log("scanned %s: %d clean, %d flagged (action=%s)"
+        % (rel_to_downloads(path), n_clean, n_threat, ACTION))
 
     return records, scan_ok
 
@@ -371,6 +417,34 @@ def sweep(seen):
 
             except Exception:
                 log("error processing item %s:\n%s" % (item_path, traceback.format_exc()))
+    prune_state(seen)
+
+
+def prune_state(seen):
+    """Drop state for files the user has since deleted so results.json / the app's
+    badges don't grow forever. 'quarantined' entries are kept — their original path
+    is intentionally gone (the file was moved to .quarantine)."""
+    try:
+        files = load_results()
+        changed = False
+        for key in list(files.keys()):
+            if files[key].get("verdict") == "quarantined":
+                continue
+            if not os.path.exists(os.path.join(DOWNLOADS, key)):
+                del files[key]
+                changed = True
+        if changed:
+            write_results(files)
+    except Exception:
+        pass
+    try:
+        gone = [k for k in list(seen.keys()) if not os.path.exists(k)]
+        if gone:
+            for k in gone:
+                seen.pop(k, None)
+            save_seen(seen)
+    except Exception:
+        pass
 
 
 def main():

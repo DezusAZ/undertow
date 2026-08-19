@@ -3,6 +3,9 @@
 .gh_token
 .env
 .env.*
+# ...but the TEMPLATE must ship: `.env.*` above also matched .env.example, so a clone
+# arrived with no config template at all and package.sh's `cp .env.example` would fail.
+!.env.example
 *.pem
 *.key
 id_rsa
@@ -33,5 +36,34 @@ node_modules/
 .DS_Store
 *.log
 
-# secrets — never back up
+# ---- runtime state + secrets: NEVER commit (regenerated on install) ----
+# config/ holds proton.conf (VPN PRIVATE KEY), ai.json, password, torrents.json, hunts,
+# resume data, clamav results, gpu_health — none of it belongs in git. Keep only examples.
+config/*
+!config/proton.conf.example
 config/secret
+# per-service state / credentials
+sabnzbd-config/
+jackett-config/
+searxng-config/
+# downloaded files (huge + possibly malware-flagged)
+downloads/
+# editor/build cruft
+.docker/
+.docker-build/
+*.bak-overnight
+*.bak-*
+# git history backups made before a history rewrite
+*.bundle
+# ---- internal dev logs: keep locally, NEVER share ----
+# STATUS.md is the running engineering log. It quotes real IPs, container internals and
+# (historically) the web password in plaintext, so it must not travel with the code.
+# MIGRATION.md documents this specific box's move. Both stay on disk; neither ships.
+STATUS.md
+MIGRATION.md
+DEEP-HUNT-DESIGN.md
+DISCOVERY-DESIGN.md
+mirror-to-drive.sh
+# packaged release artifacts (rebuild with package.sh; never ship a prebuilt blob
+# because it can silently carry the packager's own config into someone else's install)
+vpntorrent-bundle.tar.gz

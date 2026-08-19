@@ -20,6 +20,7 @@ import os
 import re
 import json
 import time
+import shutil
 import hashlib
 import threading
 import subprocess
@@ -244,8 +245,10 @@ def _scan_results():
 
 def _scan_status(item_rel):
     """Aggregate the AV verdicts for files under one item. Returns
-    (status, quarantined): status is 'clean'|'pending'|'flagged'; quarantined is
-    a list of {name, reason} for files the scan removed to .quarantine."""
+    (status, threats): status is 'clean'|'pending'|'flagged'; threats is a list of
+    {name, reason, verdict} for files the scan flagged. verdict 'flagged' means the
+    file was KEPT in place for the user to inspect/decide (default); 'quarantined'
+    means it was moved to .quarantine."""
     files = _scan_results()
     if not files:
         return "pending", []
@@ -254,10 +257,11 @@ def _scan_status(item_rel):
     relevant = [(k, v) for k, v in files.items() if k == key or k.startswith(prefix)]
     if not relevant:
         return "pending", []
-    quarantined = [{"name": os.path.basename(k), "reason": v.get("reason", "")}
-                   for k, v in relevant if v.get("verdict") == "quarantined"]
-    if quarantined:
-        return "flagged", quarantined
+    threats = [{"name": os.path.basename(k), "reason": v.get("reason", ""),
+                "verdict": v.get("verdict", "flagged")}
+               for k, v in relevant if v.get("verdict") in ("flagged", "quarantined")]
+    if threats:
+        return "flagged", threats
     return "clean", []
 
 
@@ -591,6 +595,45 @@ def resolve_file(item_id, i):
     return real
 
 
+def delete_item(item_id):
+    """Delete a library item's files from disk (its folder, or single file) and reindex.
+    Path-safety: only ever removes something strictly inside the save dir (no traversal /
+    symlink escape). Returns {"ok", "rel", "freed"} — never raises."""
+    save_dir = _cfg["save_dir"]
+    with _lock:
+        item = next((it for it in _index if it.get("id") == item_id), None)
+    if not item or not save_dir:
+        return {"ok": False, "rel": "", "freed": 0}
+    rel = item.get("_rel", "")
+    target = os.path.realpath(os.path.join(save_dir, rel))
+    base = os.path.realpath(save_dir)
+    # must live strictly UNDER the save dir (never the save dir itself, never outside)
+    if target == base or not target.startswith(base + os.sep):
+        return {"ok": False, "rel": rel, "freed": 0}
+    freed = 0
+    try:
+        if os.path.isdir(target) and not os.path.islink(target):
+            for dp, _d, fs in os.walk(target, onerror=lambda e: None):
+                for f in fs:
+                    try:
+                        freed += os.path.getsize(os.path.join(dp, f))
+                    except OSError:
+                        pass
+            shutil.rmtree(target, ignore_errors=True)
+        elif os.path.exists(target):
+            try:
+                freed = os.path.getsize(target)
+            except OSError:
+                pass
+            os.remove(target)
+        else:
+            return {"ok": False, "rel": rel, "freed": 0}
+    except Exception:
+        return {"ok": False, "rel": rel, "freed": 0}
+    _scan_once()                             # rebuild the index without the deleted item
+    return {"ok": True, "rel": rel, "freed": freed}
+
+
 def probe_vcodec(path):
     """Return the first video stream's codec name (e.g. 'h264'), '' on failure."""
     try:
@@ -604,6 +647,297 @@ def probe_vcodec(path):
             if out.stdout.strip() else ""
     except Exception:
         return ""
+
+
+# ===========================================================================
+# Prepare-to-seekable-MP4 (GPU) — the player's real engine
+# ===========================================================================
+# Instead of a live, un-seekable CPU transcode, we PREPARE a complete, faststart MP4 in
+# a cache and serve it with byte-ranges (fully seekable). Video the browser can decode
+# itself (h264/hevc/vp9/av1) is REMUXED (container swap, no re-encode) so YOUR machine's
+# GPU decodes it — zero server transcode. Only exotic codecs get a GPU (NVENC) re-encode.
+CACHE_DIR = os.environ.get("CACHE_DIR", "/cache")
+_BROWSER_VCODECS = {"h264", "hevc", "vp9", "av1"}      # client can decode these directly
+# audio we can safely COPY into mp4 for cross-browser playback. ac3/eac3/multichannel-aac
+# play silently in Chrome/Firefox, so those are transcoded to stereo aac instead.
+_BROWSER_ACODECS = {"aac", "mp3"}
+_CACHE_CAP_BYTES = int(os.environ.get("CACHE_CAP_GB", "80")) * 1024 * 1024 * 1024
+_PREP_STALL_SECS = int(os.environ.get("PREP_STALL_SECS", "900"))   # kill a prep making no progress
+_KEY_RE = re.compile(r"^[0-9a-f]{20}$")
+_prep_lock = threading.Lock()
+_prep_jobs = {}                                        # key -> True while a prep runs
+
+
+def _ffprobe1(path, entry, stream=None):
+    cmd = ["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe"]
+    if stream:
+        cmd += ["-select_streams", stream]
+    cmd += ["-show_entries", entry, "-of", "default=nw=1:nk=1", path]
+    try:
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+        s = out.stdout.decode("utf-8", "replace").strip().splitlines()
+        return s[0].strip() if s else ""
+    except Exception:
+        return ""
+
+
+def _probe_acodec(path):
+    return _ffprobe1(path, "stream=codec_name", "a:0")
+
+
+def _probe_achannels(path):
+    try:
+        return int(_ffprobe1(path, "stream=channels", "a:0") or 0)
+    except ValueError:
+        return 0
+
+
+def _probe_duration(path):
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
+             "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+        return float(out.stdout.decode().strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def cache_key(real_path):
+    """Deterministic id for a source file (path+mtime+size) so replays hit the cache."""
+    try:
+        st = os.stat(real_path)
+    except OSError:
+        return None
+    raw = "%s|%d|%d" % (real_path, st.st_mtime_ns, st.st_size)
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:20]
+
+
+def _status_path(key):
+    return os.path.join(CACHE_DIR, key + ".json")
+
+
+def _out_path(key):
+    return os.path.join(CACHE_DIR, key + ".mp4")
+
+
+def _write_status(key, d):
+    try:
+        d = dict(d, ts=time.time())               # timestamp: lets a stale 'preparing' be detected
+        tmp = _status_path(key) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(d, f)
+        os.replace(tmp, _status_path(key))
+    except Exception:
+        pass
+
+
+def read_status(key):
+    """{state: preparing|ready|error, progress, mode} — for the UI to poll. Key MUST be a
+    real 20-hex cache id (no path traversal). A 'preparing' whose status hasn't been touched
+    in _PREP_STALL_SECS is treated as dead (e.g. the transcoder crashed mid-prep)."""
+    if not _KEY_RE.match(key or ""):
+        return {"state": "unknown"}
+    if os.path.exists(_out_path(key)):
+        return {"state": "ready", "progress": 100}
+    try:
+        d = json.load(open(_status_path(key)))
+    except Exception:
+        return {"state": "unknown"}
+    if d.get("state") == "preparing" and (time.time() - float(d.get("ts", 0))) > _PREP_STALL_SECS:
+        return {"state": "error", "reason": "stalled"}
+    return d
+
+
+def _prep_worker(real, key, dur):
+    out, tmp = _out_path(key), _out_path(key) + ".part"
+    try:
+        vcodec = probe_vcodec(real)
+        acodec = _probe_acodec(real)
+        achan = _probe_achannels(real)
+        if vcodec in _BROWSER_VCODECS:
+            pre, vmap, mode = [], ["-c:v", "copy"], "remux"          # client-side decode
+            if vcodec == "hevc":
+                vmap += ["-tag:v", "hvc1"]                           # Safari needs hvc1, not hev1
+        else:
+            pre = ["-hwaccel", "cuda"]                               # GPU decode + encode
+            vmap = ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "23", "-b:v", "0"]
+            mode = "gpu-transcode"
+        # copy audio only if it's stereo/mono aac|mp3; ac3/eac3/multichannel play silently
+        # in Chrome/Firefox, so downmix those to stereo aac.
+        if acodec in _BROWSER_ACODECS and 0 < achan <= 2:
+            amap = ["-c:a", "copy"]
+        else:
+            amap = ["-c:a", "aac", "-ac", "2", "-b:a", "192k"]
+        _write_status(key, {"state": "preparing", "progress": 0, "mode": mode})
+        cmd = (["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-progress", "pipe:1", "-protocol_whitelist", "file,pipe"]
+               + pre + ["-i", real] + vmap + amap
+               + ["-dn", "-sn", "-movflags", "+faststart", "-f", "mp4", "-y", tmp])
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # watchdog: kill a prep whose output stops growing for _PREP_STALL_SECS (a hung
+        # decode emits no -progress AND doesn't grow the .part) so it can't pin a thread.
+        stop_wd = threading.Event()
+
+        def _watchdog():
+            last_sz, last_change = -1, time.time()
+            while not stop_wd.wait(30):
+                try:
+                    sz = os.path.getsize(tmp)
+                except OSError:
+                    sz = -1
+                now = time.time()
+                if sz != last_sz:
+                    last_sz, last_change = sz, now
+                elif now - last_change > _PREP_STALL_SECS:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    return
+        threading.Thread(target=_watchdog, daemon=True).start()
+        for line in proc.stdout:                                     # parse -progress
+            line = line.decode("utf-8", "replace").strip()
+            if line.startswith("out_time_ms=") and dur > 0:
+                try:
+                    pct = min(99, int(int(line.split("=", 1)[1]) / 1e6 / dur * 100))
+                    _write_status(key, {"state": "preparing", "progress": pct, "mode": mode})
+                except Exception:
+                    pass
+        proc.wait()
+        stop_wd.set()
+        if proc.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+            os.replace(tmp, out)
+            _write_status(key, {"state": "ready", "progress": 100, "mode": mode})
+        else:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            _write_status(key, {"state": "error", "mode": mode})
+    except Exception as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        _write_status(key, {"state": "error", "error": str(e)[:160]})
+    finally:
+        with _prep_lock:
+            _prep_jobs.pop(key, None)
+        _cache_sweep()
+
+
+def prepare_to_cache(real_path):
+    """Kick off (or reuse) preparation of a seekable MP4 for `real_path`. Returns
+    {"key", "state"}; poll read_status(key) until 'ready', then serve cache_file(key)."""
+    key = cache_key(real_path)
+    if not key:
+        return {"state": "error"}
+    if os.path.exists(_out_path(key)):
+        return {"key": key, "state": "ready"}
+    with _prep_lock:
+        if key in _prep_jobs:
+            return {"key": key, "state": "preparing"}
+        _prep_jobs[key] = True
+    dur = _probe_duration(real_path)
+    try:
+        threading.Thread(target=_prep_worker, args=(real_path, key, dur), daemon=True).start()
+    except Exception:                              # never leak the _prep_jobs slot
+        with _prep_lock:
+            _prep_jobs.pop(key, None)
+        _write_status(key, {"state": "error"})
+        return {"key": key, "state": "error"}
+    return {"key": key, "state": "preparing"}
+
+
+def touch_cache(key):
+    """Bump the mtime of a prepared file on SERVE, so LRU eviction (which sorts by mtime —
+    atime is unreliable) never evicts something being watched. Transcoder-side (cache rw)."""
+    if not _KEY_RE.match(key or ""):
+        return False
+    try:
+        now = time.time()
+        os.utime(_out_path(key), (now, now))
+        return True
+    except OSError:
+        return False
+
+
+def cache_reaper():
+    """Run once at transcoder startup: clear crash debris. Delete orphaned *.part (no live
+    job) and flip any 'preparing' status with no output to 'error' — so a prep interrupted
+    by a restart doesn't leave a UI polling forever or a multi-GB .part leaking."""
+    try:
+        names = os.listdir(CACHE_DIR)
+    except OSError:
+        return
+    for n in names:
+        try:
+            if n.endswith(".part"):
+                os.remove(os.path.join(CACHE_DIR, n))
+            elif n.endswith(".json"):
+                key = n[:-5]
+                if os.path.exists(_out_path(key)):
+                    continue
+                try:
+                    d = json.load(open(os.path.join(CACHE_DIR, n)))
+                except Exception:
+                    d = {}
+                if d.get("state") == "preparing":
+                    _write_status(key, {"state": "error", "reason": "interrupted"})
+        except OSError:
+            pass
+
+
+def cache_file(key):
+    """Absolute path of a prepared MP4 for `key`, or None. Key must be our 20-hex id."""
+    if not re.fullmatch(r"[0-9a-f]{20}", key or ""):
+        return None
+    p = _out_path(key)
+    return p if os.path.isfile(p) else None
+
+
+def _cache_sweep():
+    """Keep the cache under its size cap by evicting the least-recently-served prepared
+    files. Sort by MTIME (bumped on serve via touch_cache — atime is unreliable through the
+    ro mount / relatime), never evict something served in the last 10 min (likely mid-play),
+    and count in-flight *.part toward the total so preps can't blow past the cap. Never raises."""
+    try:
+        now = time.time()
+        total = 0
+        for n in os.listdir(CACHE_DIR):                 # in-flight preps count too
+            if n.endswith(".part"):
+                try:
+                    total += os.path.getsize(os.path.join(CACHE_DIR, n))
+                except OSError:
+                    pass
+        files = []
+        for n in os.listdir(CACHE_DIR):
+            if not n.endswith(".mp4"):
+                continue
+            fp = os.path.join(CACHE_DIR, n)
+            try:
+                stt = os.stat(fp)
+            except OSError:
+                continue
+            files.append((stt.st_mtime, stt.st_size, fp))
+            total += stt.st_size
+        files.sort()                                    # least-recently-served first
+        for mtime, sz, fp in files:
+            if total <= _CACHE_CAP_BYTES:
+                break
+            if now - mtime < 600:                       # protect a file being watched now
+                continue
+            try:
+                os.remove(fp)
+                total -= sz
+                st = fp[:-4] + ".json"
+                if os.path.exists(st):
+                    os.remove(st)
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 
 # --- HTTP streaming helpers ------------------------------------------------
@@ -790,6 +1124,7 @@ def transcode_file(handler, path):
             except Exception:
                 try:
                     proc.kill()
+                    proc.wait()          # reap so the SIGKILLed child isn't left a zombie
                 except Exception:
                     pass
         _transcode_sem.release()

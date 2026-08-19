@@ -6,6 +6,10 @@
 # 3. Generate the config, then paste its contents below.
 # 4. Save this file as  config/proton.conf  (drop the .example) and restart.
 #
+# FAILOVER (optional): add more servers by dropping extra configs next to this one, named
+# proton-<name>.conf (e.g. proton-nl.conf) or under config/vpn/*.conf. Undertow tries them in
+# order and fails over automatically if one goes down. Every server's Endpoint MUST be an IP.
+#
 # It will look like this:
 
 [Interface]
@@ -17,3 +21,5 @@ DNS = 10.2.0.1
 PublicKey = <server-public-key>
 AllowedIPs = 0.0.0.0/0
 Endpoint = <server-ip>:51820
+# keeps the tunnel warm + makes the server handshake promptly (needed for fast failover detection)
+PersistentKeepalive = 25

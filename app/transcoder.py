@@ -12,6 +12,7 @@ downloads dir. The heavy lifting (range/transcode logic) lives in library.py,
 which is stdlib-only and imports no libtorrent.
 """
 import os
+import json
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -23,32 +24,67 @@ _BASE = os.path.realpath(SAVE)
 
 
 def _safe(path):
-    """Only allow real paths inside the read-only downloads mount."""
+    """Return the RESOLVED path if it's a real file inside the read-only downloads
+    mount, else None. Returning the resolved path (and handing THAT to ffmpeg) means
+    the validated path and the opened path are identical — no symlink/`..` gap."""
     real = os.path.realpath(path)
-    return (real == _BASE or real.startswith(_BASE + os.sep)) and os.path.isfile(real)
+    if (real == _BASE or real.startswith(_BASE + os.sep)) and os.path.isfile(real):
+        return real
+    return None
 
 
 class H(BaseHTTPRequestHandler):
+    timeout = 300      # a vanished client can't hold the ffmpeg pipe / slot forever
+
     def log_message(self, *a):
         pass
 
+    def _json(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _404(self):
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        if u.path != "/transcode":
-            self.send_response(404)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        path = (urllib.parse.parse_qs(u.query).get("path") or [""])[0]
-        if not path or not _safe(path):
-            self.send_response(404)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        library.transcode_file(self, path)   # live ffmpeg remux/transcode -> fMP4
+        qs = urllib.parse.parse_qs(u.query)
+        if u.path == "/prepare":
+            # PREPARE a seekable MP4 (remux for browser codecs, GPU NVENC for exotic).
+            path = (qs.get("path") or [""])[0]
+            real = _safe(path) if path else None
+            if not real:
+                self._json({"state": "error", "error": "not found"}, 404)
+                return
+            self._json(library.prepare_to_cache(real))
+        elif u.path == "/prepstatus":
+            self._json(library.read_status((qs.get("key") or [""])[0]))
+        elif u.path == "/touch":
+            # mark a prepared file recently-used so LRU eviction won't drop it mid-play
+            self._json({"ok": library.touch_cache((qs.get("key") or [""])[0])})
+        elif u.path == "/transcode":
+            # legacy live path (fallback)
+            path = (qs.get("path") or [""])[0]
+            real = _safe(path) if path else None
+            if not real:
+                self._404()
+                return
+            library.transcode_file(self, real)
+        else:
+            self._404()
 
 
 if __name__ == "__main__":
+    library.cache_reaper()          # clear crash debris (orphaned .part / stuck 'preparing')
     print(f"[transcoder] sandboxed decoder on http://0.0.0.0:{PORT} (reads {SAVE} ro)",
           flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

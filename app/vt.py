@@ -107,6 +107,46 @@ if not PASSWORD:                       # no password set -> make one so we're ne
 _sessions = {}                         # token -> expiry epoch (in-memory)
 _SESSION_TTL = 604800                  # 7 days, matches the cookie Max-Age
 
+# --- login brute-force throttle ---------------------------------------------
+# Per-client-IP failure counter. This is the real brute-force defence: the server is
+# threaded, so a per-request sleep runs in parallel across connections and throttles
+# nothing. Deliberately NOT a global concurrency cap — the same handler serves
+# long-lived media streams, and a global cap would let one movie stall the whole UI.
+_LOGIN_FAILS = {}                      # ip -> [fail_count, window_start_epoch]
+_LOGIN_MAX = 5                         # failures allowed per window
+_LOGIN_WINDOW = 900                    # 15 minutes
+_login_lock = threading.Lock()
+
+
+def _login_blocked(ip):
+    with _login_lock:
+        rec = _LOGIN_FAILS.get(ip)
+        if not rec:
+            return False
+        count, start = rec
+        if time.time() - start > _LOGIN_WINDOW:
+            _LOGIN_FAILS.pop(ip, None)   # window elapsed -> forgiven
+            return False
+        return count >= _LOGIN_MAX
+
+
+def _login_fail(ip):
+    now = time.time()
+    with _login_lock:
+        count, start = _LOGIN_FAILS.get(ip, (0, now))
+        if now - start > _LOGIN_WINDOW:
+            count, start = 0, now
+        _LOGIN_FAILS[ip] = (count + 1, start)
+        if len(_LOGIN_FAILS) > 4096:     # bound memory against spoofed-source floods
+            for k in [k for k, v in _LOGIN_FAILS.items()
+                      if now - v[1] > _LOGIN_WINDOW][:2048]:
+                _LOGIN_FAILS.pop(k, None)
+
+
+def _login_ok(ip):
+    with _login_lock:
+        _LOGIN_FAILS.pop(ip, None)
+
 # --- stream tokens ---------------------------------------------------------
 # Let an external player (VLC on your phone/laptop/TV) fetch a file over Tailscale
 # WITHOUT the login cookie. The logged-in UI mints a short-lived HMAC token bound
@@ -236,8 +276,21 @@ def vpn_healthy():
 def monitor():
     """Pause everything if the VPN drops; pause torrents the moment they finish."""
     global vpn_ok
+    was_ok = None
     while True:
         ok = vpn_healthy()
+        if ok and was_ok is False:
+            # VPN just came back after a drop. During a failover the entrypoint tears
+            # down and rebuilds the wg interface; libtorrent's listen sockets were bound
+            # to the old interface and are now wedged (they stay bound but send nothing,
+            # so torrents get 0 peers even after resume()). Rebind them to the fresh
+            # interface so downloads actually recover instead of silently hanging.
+            try:
+                ses.reopen_network_sockets()
+                print("[vpntorrent] VPN recovered — reopened libtorrent sockets", flush=True)
+            except Exception as e:
+                print(f"[vpntorrent] socket reopen failed: {e}", flush=True)
+        was_ok = ok
         vpn_ok = ok
         with _lock:
             items = list(_torrents.items())
@@ -252,13 +305,20 @@ def monitor():
                         h.pause()         # VPN down -> pause (not a user pause)
                     continue
                 if s.is_finished:        # download-only: stop dead on completion
+                    if not t.get("finished"):
+                        t["finished"] = True      # remember across restarts (no seeding)
+                        _save_state()
                     if not s.paused:
                         h.pause()
                         try:
                             h.save_resume_data(_RESUME_FLAGS)   # persist completed state
                         except Exception:
                             pass
-                elif s.paused and not t["user_paused"]:
+                elif s.paused and not t["user_paused"] and not t.get("finished"):
+                    # `finished` is checked as well as is_finished: right after a restart
+                    # libtorrent may still report is_finished False for a complete torrent,
+                    # and resuming it — even for one 5s cycle — would announce us as a
+                    # seeder. The persisted flag is authoritative until proven otherwise.
                     h.resume()           # VPN back & user didn't pause it -> resume
             except Exception:
                 continue
@@ -274,12 +334,16 @@ def add_magnet(magnet, cat):
     p = lt.parse_magnet_uri(magnet)
     p.save_path = path
     # We manage start/stop ourselves. Auto-management lets libtorrent override our
-    # pause() (and would auto-seed completed torrents), so turn it off.
-    p.flags &= ~lt.torrent_flags.auto_managed
+    # pause() (and would auto-seed completed torrents), so turn it off. But we must
+    # ALSO clear the default `paused` flag: libtorrent's add_torrent_params default is
+    # auto_managed|paused, and the auto-manager is what normally unpauses a new torrent.
+    # Clearing auto_managed WITHOUT clearing paused adds the torrent paused forever — it
+    # never announces to trackers, so it sits at 0 peers / "Fetching info…" indefinitely.
+    p.flags &= ~(lt.torrent_flags.auto_managed | lt.torrent_flags.paused)
     h = ses.add_torrent(p)
     ih = str(h.info_hash())
     with _lock:
-        _torrents[ih] = {"h": h, "cat": cat, "user_paused": False}
+        _torrents[ih] = {"h": h, "cat": cat, "user_paused": False, "finished": False}
     _save_state()
     try:
         h.save_resume_data(_RESUME_FLAGS)   # checkpoint once metadata arrives
@@ -332,11 +396,13 @@ def add_torrent_url(url, cat):
         p = lt.add_torrent_params()
         p.ti = lt.torrent_info(lt.bdecode(data))
     p.save_path = path
-    p.flags &= ~lt.torrent_flags.auto_managed   # never auto-seed (download-only)
+    # never auto-seed (download-only) AND never add paused (see add_magnet) — else it
+    # would stall at 0 peers instead of downloading.
+    p.flags &= ~(lt.torrent_flags.auto_managed | lt.torrent_flags.paused)
     h = ses.add_torrent(p)
     ih = str(h.info_hash())
     with _lock:
-        _torrents[ih] = {"h": h, "cat": cat, "user_paused": False}
+        _torrents[ih] = {"h": h, "cat": cat, "user_paused": False, "finished": False}
     _save_state()
     try:
         h.save_resume_data(_RESUME_FLAGS)
@@ -445,11 +511,17 @@ def _load_state():
 
 
 def _save_state():
-    """Persist each torrent's category + user-paused flag so a restart restores
-    it to the right folder and state (the .resume blob holds the rest)."""
+    """Persist each torrent's category, user-paused flag AND completion so a restart
+    restores it to the right folder and state (the .resume blob holds the rest).
+
+    `finished` matters for more than cosmetics: without it a restart cannot tell a
+    torrent we paused because it COMPLETED from one the user paused, so completed
+    torrents came back active and announced us to trackers/DHT as a seeder — which
+    this app promises never to do."""
     try:
         with _lock:
-            data = {ih: {"cat": t["cat"], "user_paused": t["user_paused"]}
+            data = {ih: {"cat": t["cat"], "user_paused": t["user_paused"],
+                         "finished": bool(t.get("finished"))}
                     for ih, t in _torrents.items()}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -525,8 +597,14 @@ def restore_torrents():
         try:
             with open(os.path.join(RESUME_DIR, fn), "rb") as f:
                 atp = lt.read_resume_data(f.read())
-            atp.flags &= ~lt.torrent_flags.auto_managed
+            # Clear auto_managed AND paused so the torrent is startable at all (a blob
+            # saved while paused otherwise comes back paused with no way out), but then
+            # immediately pause it below. monitor() decides within 5s whether it should
+            # actually run — that keeps COMPLETED torrents from announcing us as a seeder
+            # in the seconds before the first monitor pass.
+            atp.flags &= ~(lt.torrent_flags.auto_managed | lt.torrent_flags.paused)
             h = ses.add_torrent(atp)
+            h.pause()
             ih = str(h.info_hash())
             st = state.get(ih) or state.get(fn[:-7]) or {}
             cat = st.get("cat")
@@ -538,11 +616,16 @@ def restore_torrents():
             if cat not in FOLDERS:
                 cat = "other"
             up = bool(st.get("user_paused", False))
+            # Carry completion across the restart. libtorrent's own is_finished can read
+            # False for a moment after add (the resume check hasn't run), and monitor()
+            # would take that moment to "resume" a finished torrent — a brief but real
+            # seeder announce. Trusting our own persisted flag closes that window.
+            fin = bool(st.get("finished", False))
             with _lock:
-                _torrents[ih] = {"h": h, "cat": cat, "user_paused": up}
-            if up:
-                h.pause()
-            print(f"[vpntorrent] restored {ih} -> {cat}", flush=True)
+                _torrents[ih] = {"h": h, "cat": cat, "user_paused": up, "finished": fin}
+            # already paused above; monitor() starts it if it is genuinely unfinished
+            print(f"[vpntorrent] restored {ih} -> {cat}"
+                  f"{' (complete)' if fin else ''}", flush=True)
         except Exception as e:
             print(f"[vpntorrent] restore skip {fn} ({e})", flush=True)
 
@@ -564,10 +647,13 @@ def snapshot():
             state = "Checking…"
         elif s.is_finished:
             state = "✓ Complete"
+        elif s.paused or t["user_paused"]:
+            # check paused BEFORE downloading_metadata: libtorrent still reports the
+            # state as downloading_metadata while paused, so a paused torrent would
+            # otherwise masquerade as "Fetching info…" and hide that it's stalled.
+            state = "Paused"
         elif s.state == lt.torrent_status.downloading_metadata:
             state = "Fetching info…"
-        elif s.paused or t["user_paused"]:
-            state = "Paused"
         else:
             state = "Downloading"
         out.append({
@@ -2222,6 +2308,10 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
         self.send_header("Referrer-Policy", "no-referrer")  # don't leak stream tokens via Referer
+        # Nothing here is ever meant to be framed; framing it is only useful for
+        # clickjacking the download/delete controls.
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
         for k, v in (headers or []):
             self.send_header(k, v)
         self.end_headers()
@@ -2360,15 +2450,56 @@ class H(BaseHTTPRequestHandler):
         else:
             self._send(404, "not found")
 
+    def _origin_ok(self):
+        """Reject cross-origin state-changing requests (CSRF).
+
+        The session cookie is SameSite=Lax, but "same site" ignores the PORT: another
+        web app on this same host (http://host:8800) counts as same-site with
+        http://host:8722, so its pages could forge POSTs — /add, /remove,
+        /library/delete — with the user's cookie attached. Only Origin distinguishes
+        by port, so that is what we check.
+
+        A missing Origin is allowed: browsers always send it on cross-origin POSTs,
+        while non-browser clients (curl, the installer's self-test) legitimately omit
+        it — and those aren't riding a victim's cookie.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        host = self.headers.get("Host") or ""
+        # Compare scheme+host+port. Behind the documented Tailscale-Serve HTTPS front
+        # door the browser's Origin is https://<name> while Host is the same name, so
+        # accept either scheme for an otherwise exact host match.
+        try:
+            p = urlparse(origin)
+        except Exception:
+            return False
+        if p.scheme not in ("http", "https") or not p.netloc:
+            return False
+        return p.netloc == host
+
     def do_POST(self):
         path = urlparse(self.path).path
+        if not self._origin_ok():
+            self._send(403, "cross-origin request refused", "text/plain")
+            return
         if path == "/login":
             try: n = int(self.headers.get("Content-Length", 0) or 0)
             except ValueError: n = -1
             if not (0 <= n <= 65536):
                 self._send(400, "bad request", "text/plain"); return
+            # Throttle BEFORE reading/comparing. The old defence was a 1s sleep on
+            # failure, which does nothing on a threaded server: an attacker opens 200
+            # connections and all 200 sleeps run in parallel. Count failures per client
+            # instead and stop answering.
+            ip = self.client_address[0] if self.client_address else "?"
+            if _login_blocked(ip):
+                self._send(429, "too many failed logins — wait and try again",
+                           "text/plain")
+                return
             pw = (parse_qs(self.rfile.read(n).decode()).get("pw") or [""])[0]
             if PASSWORD and hmac.compare_digest(pw, PASSWORD):
+                _login_ok(ip)
                 tok = secrets.token_hex(16)
                 now = time.time()                        # prune expired tokens, then register
                 for t in [t for t, e in _sessions.items() if e <= now]:
@@ -2377,7 +2508,8 @@ class H(BaseHTTPRequestHandler):
                 self._redirect("/", [("Set-Cookie",
                     f"vt_session={tok}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800")])
             else:
-                time.sleep(1)            # slow down brute force
+                _login_fail(ip)          # counts toward the per-IP lockout above
+                time.sleep(1)            # plus a small per-connection delay
                 self._redirect("/login?e=1")
             return
         if path == "/logout":

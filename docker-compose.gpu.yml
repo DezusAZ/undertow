@@ -1,0 +1,25 @@
+# OPTIONAL hardware-transcoding overlay.
+#
+# Layered on top of docker-compose.yml only when the host actually has the NVIDIA
+# container runtime. install.sh detects that and sets COMPOSE_FILE in .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml
+#
+# Use it manually with:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Every containment property of the decode sandbox is preserved (non-root, no caps,
+# no-new-privileges, read-only rootfs, NO network, downloads mounted read-only) — this
+# adds a GPU decode surface and nothing else.
+services:
+  transcoder:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility

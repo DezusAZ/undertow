@@ -1,0 +1,11 @@
+# The image only needs app/ (Dockerfile: COPY app/ /app/). Exclude everything
+# else from the build context: root-owned runtime config/state dirs (which the
+# build user can't even read) and secrets must NEVER enter image layers.
+*
+!app/
+
+# ...but strip editor/backup/cache cruft even from app/
+app/**/__pycache__/
+app/**/*.pyc
+app/*.bak-*
+app/**/*.bak-*

@@ -201,14 +201,108 @@ gpu_heal() {
     echo "0 0" > "$GPU_STATE" 2>/dev/null || true  # reset the restart backoff
 }
 
+# --- KILL-SWITCH INTEGRITY (anonymity fail-safe) ------------------------------------
+# The entrypoint arms a fail-closed firewall at start, but nothing re-checks it afterwards.
+# Anything that flushes or relaxes OUTPUT (a stray `iptables -F` in the shared namespace, a
+# sidecar image's own firewall setup, a partially-applied rule set) would silently un-protect
+# every container in this namespace while the UI still says "VPN: connected".
+# We re-assert the invariant every cycle. DROP is the safe direction: the worst case of being
+# wrong is that downloads stop, never that traffic escapes.
+killswitch_guard() {
+    pol=$(docker exec vpntorrent iptables -S OUTPUT 2>/dev/null | head -1)
+    [ -n "$pol" ] || return 0                       # can't inspect (container busy) -> next cycle
+    [ "$pol" = "-P OUTPUT DROP" ] && return 0       # already fail-closed
+    echo "killswitch: OUTPUT policy is '$pol' — NOT fail-closed; re-arming now"
+    # Only safe to force DROP if the tunnel-accept rule survives; otherwise the rule set was
+    # wiped and a bare DROP would cut the container off with no way back. In that case let the
+    # entrypoint rebuild the whole thing from scratch by restarting the container.
+    if docker exec vpntorrent iptables -C OUTPUT -o wg -j ACCEPT >/dev/null 2>&1; then
+        docker exec vpntorrent iptables -P OUTPUT DROP >/dev/null 2>&1 \
+            && echo "killswitch: re-armed (-P OUTPUT DROP)" \
+            || echo "killswitch: FAILED to re-arm — restarting vpntorrent to rebuild"
+    else
+        echo "killswitch: rule set is gone entirely -> restarting vpntorrent to rebuild it"
+        docker restart vpntorrent >/dev/null 2>&1 || true
+        # the dep loop below notices the new namespace and recreates the five sidecars
+    fi
+}
+
+# --- APP LIVENESS ------------------------------------------------------------------
+# The app process can be alive while the web UI is wedged (a stuck thread, an exhausted
+# handler pool). The container looks "running" and nothing recovers it. Probe the real HTTP
+# surface; two consecutive failures (~2 min apart) trigger a restart, so a single slow
+# response during a heavy search never causes a needless bounce.
+APP_FAIL_STATE="$COMPOSE_DIR/config/.app_unhealthy"   # "<StartedAt> <consecutive_failures>"
+# $1 = vpntorrent's StartedAt (already inspected by the caller; don't inspect twice)
+app_liveness() {
+    _started="$1"
+    # BOOT GRACE. The app process does not exist for a long time BY DESIGN while the VPN
+    # is being established: entrypoint.sh retries the whole server pool 6 times with a
+    # ~14s handshake wait plus 6s sleeps before it ever launches the app. With one config
+    # that is ~2 minutes; with three it is ~5. Restarting inside that window kills the
+    # entrypoint mid-retry, destroys the namespace, orphans all five siblings and starts
+    # the whole bring-up again — a slow VPN would become a permanent restart loop.
+    # So: never probe a container younger than the worst-case bring-up.
+    _age=$(docker exec vpntorrent sh -c 'awk "{print int(\$1)}" /proc/uptime' 2>/dev/null)
+    case "$_age" in ''|*[!0-9]*) return 0 ;; esac       # can't tell -> do nothing
+    if [ "$_age" -lt 600 ]; then
+        return 0
+    fi
+
+    if docker exec vpntorrent python3 -c '
+import urllib.request, sys
+try:
+    urllib.request.urlopen("http://127.0.0.1:8722/login", timeout=10)
+except urllib.error.HTTPError:
+    pass                      # any HTTP status means the server answered
+except Exception:
+    sys.exit(1)
+' >/dev/null 2>&1; then
+        rm -f "$APP_FAIL_STATE" 2>/dev/null
+        return 0
+    fi
+
+    # Failing. Count consecutive strikes, but tie them to THIS container instance: if the
+    # container restarted, the old strikes are meaningless and must not carry over.
+    _prev_started=""; _fails=0
+    [ -f "$APP_FAIL_STATE" ] && read _prev_started _fails < "$APP_FAIL_STATE" 2>/dev/null
+    case "$_fails" in ''|*[!0-9]*) _fails=0 ;; esac
+    [ "$_prev_started" = "$_started" ] || _fails=0      # different instance -> reset
+    _fails=$((_fails + 1))
+    echo "$_started $_fails" > "$APP_FAIL_STATE" 2>/dev/null
+    if [ "$_fails" -ge 3 ]; then
+        echo "app: web UI unresponsive $_fails cycles in a row -> restarting vpntorrent"
+        rm -f "$APP_FAIL_STATE" 2>/dev/null
+        docker restart vpntorrent >/dev/null 2>&1 || true
+    else
+        echo "app: web UI did not answer (strike $_fails/3)"
+    fi
+}
+
 # The five services that SHARE vpntorrent's network namespace. (bitmagnet-postgres is
 # intentionally NOT here — it lives on its own sandbox-net IP, so it is never orphaned.)
 DEPS="jackett flaresolverr searxng bitmagnet sabnzbd"
 
 # Recreate one service so it rejoins the live namespace. --no-deps: never touch
 # vpntorrent or postgres. --no-build: use the prebuilt image (the sidecar can't build).
+# True only when vpntorrent's kill-switch is LIVE. Checked against the running firewall,
+# never a marker file (a file survives an OOM kill and lies).
+killswitch_live() {
+    [ "$(docker exec vpntorrent iptables -S OUTPUT 2>/dev/null | head -1)" = "-P OUTPUT DROP" ]
+}
+
 recreate() {
     svc="$1"
+    # MANDATORY GATE. compose's `depends_on: service_healthy` protects the normal start
+    # path, but `--no-deps` below deliberately bypasses depends_on — which is exactly the
+    # post-crash path where the arming window is most likely. Without this check we would
+    # re-attach a sibling to a namespace whose firewall is not up yet, and its first
+    # packets would leave via the bridge as the operator's real IP. Wait instead: the next
+    # heal cycle is only 15s away and the sibling being down is harmless.
+    if ! killswitch_live; then
+        echo "heal: kill-switch not armed yet — deferring recreate of $svc (no unprotected start)"
+        return 1
+    fi
     if [ -f "$COMPOSE_FILE" ]; then
         docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --no-deps --no-build \
             --force-recreate "$svc" >/dev/null 2>&1 && return 0
@@ -236,6 +330,9 @@ fi
 main=$(docker inspect -f '{{.State.StartedAt}}' vpntorrent 2>/dev/null)
 [ -n "$main" ] || exit 0
 
+# Anonymity invariant first — it matters more than any availability concern.
+killswitch_guard
+
 for dep in $DEPS; do
     c="vpntorrent-$dep"
     status=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null) || continue
@@ -261,3 +358,9 @@ for dep in $DEPS; do
         recreate "$dep"
     fi
 done
+
+# Availability check LAST: if this restarts the app, the next cycle re-attaches the
+# five sidecars to the new namespace (that is exactly what the loop above is for).
+# $main is vpntorrent's StartedAt, already inspected above — strikes are tied to it so a
+# restart never counts its own boot window against itself.
+app_liveness "$main"
