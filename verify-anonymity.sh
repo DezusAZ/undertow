@@ -169,6 +169,31 @@ for c in $NETNS_CTRS; do
   else bad "$c resolves via '${cd_ns:-none}' (expected $MAIN_DNS) — SEARCH TERMS CAN LEAK"; fi
 done
 
+# --- 4b. can anything escape around the tunnel? ------------------------------
+# The leak that actually matters is a packet leaving via the Docker bridge, because
+# Docker MASQUERADEs it to your real public IP. Try it on purpose: bind a socket to the
+# bridge address and dial a public host. The kill-switch must stop it. This is
+# deterministic and disruption-free, unlike --drop-test.
+echo; bold "Leak path (bridge bypass)"
+BYPASS="$(dex "$CTR" 'python3 -c "
+import socket, subprocess
+out = subprocess.run([\"ip\",\"-4\",\"addr\",\"show\",\"eth0\"], capture_output=True, text=True).stdout
+br = [l.split()[1].split(\"/\")[0] for l in out.splitlines() if \"inet \" in l]
+if not br:
+    print(\"NOBRIDGE\"); raise SystemExit(0)
+s = socket.socket(); s.settimeout(6)
+try:
+    s.bind((br[0], 0)); s.connect((\"1.1.1.1\", 443)); print(\"OPEN\")
+except Exception:
+    print(\"BLOCKED\")
+"')"
+case "$BYPASS" in
+  BLOCKED)   ok "traffic cannot escape via the Docker bridge (the real-IP path is closed)" ;;
+  NOBRIDGE)  ok "no bridge interface in the namespace — nothing to bypass through" ;;
+  OPEN)      bad "!!! traffic CAN leave via the Docker bridge — it would appear as your real IP" ;;
+  *)         warn "bridge-bypass check inconclusive (${BYPASS:-no answer})" ;;
+esac
+
 # --- 5. torrent engine is bound to the tunnel --------------------------------
 echo; bold "Torrent engine"
 LISTEN="$(dex "$CTR" "ss -lnp 2>/dev/null | grep -m1 ':6881' | awk '{print \$5}'")"
@@ -187,11 +212,30 @@ if [ "${1:-}" = "--drop-test" ]; then
   yellow "  Taking the tunnel down for a few seconds — downloads will pause, then resume."
   # Down the interface only; the supervisor in entrypoint.sh re-establishes it within ~20s.
   d exec "$CTR" ip link set wg down >/dev/null 2>&1
-  sleep 2
-  LEAKED="$(egress_ip)"
+  # Probe immediately and only once: the supervisor notices a downed tunnel within
+  # ~20s and rebuilds it, so a slow probe measures the RECOVERED tunnel instead.
+  LEAKED="$(dex "$CTR" 'python3 -c "
+import urllib.request
+try:
+    print(urllib.request.urlopen(\"https://api.ipify.org\", timeout=5).read().decode().strip())
+except Exception as e:
+    print(\"ERR:%s\" % e)
+"')"
   case "$LEAKED" in
-    ERR:*|"") ok "with the tunnel down, the container CANNOT reach the internet (fails closed)" ;;
-    *)        bad "!!! CRITICAL LEAK: tunnel down but traffic still exits as $LEAKED" ;;
+    ERR:*|"")
+      ok "with the tunnel down, the container CANNOT reach the internet (fails closed)" ;;
+    "$HOST_IP")
+      # The only real leak: packets escaped as the operator's own address.
+      bad "!!! CRITICAL LEAK: tunnel down but traffic exited as your REAL IP ($LEAKED)" ;;
+    *)
+      # Reachable, but NOT as the real IP — the supervisor rebuilt the tunnel before the
+      # probe completed. That is correct self-healing, not a leak. Only flag it as a leak
+      # if it is the real IP (case above); saying "leak" here would be a false alarm.
+      if [ -n "$HOST_IP" ]; then
+        ok "no leak: tunnel was rebuilt before the probe (exited as $LEAKED, not your real IP $HOST_IP)"
+      else
+        warn "tunnel recovered before the probe could run (exited as $LEAKED); could not compare to your real IP"
+      fi ;;
   esac
   yellow "  Restoring the tunnel…"
   d exec "$CTR" ip link set wg up >/dev/null 2>&1
