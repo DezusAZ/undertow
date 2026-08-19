@@ -56,6 +56,13 @@ RISKY_EXEC = {
 
 CLAMSCAN_TIMEOUT = 3600  # seconds
 
+# Bump this whenever the DETECTION RULES change (RISKY_EXEC, the category logic, ...).
+# `seen` is keyed on file content alone, so without this an item scanned under older
+# rules keeps its old verdict forever and is never re-evaluated — which is how a 1.3 GB
+# PE32 executable sat in a movies folder unflagged after .exe was added to RISKY_EXEC.
+# Changing this forces exactly one re-scan of every existing item.
+RULES_VERSION = 2
+
 
 def log(msg):
     print(msg, flush=True)
@@ -391,15 +398,20 @@ def sweep(seen):
 
                 # Empty item: nothing to scan, but mark seen so we don't recompute.
                 if count == 0:
-                    seen[item_path] = sig
+                    seen[item_path] = [RULES_VERSION] + list(sig)
                     continue
 
                 # Still being written?
                 if (now - max_mtime) < SETTLE:
                     continue
 
-                # Unchanged since last scan?
-                if seen.get(item_path) == sig:
+                # Unchanged since last scan AND scanned under the current rules?
+                # Stored form is [rules_version, count, bytes, mtime]. Anything in the
+                # old form (no version) re-scans once, which is what self-heals a
+                # library scanned before a detection rule was added.
+                stamp = [RULES_VERSION] + list(sig)
+                prev = seen.get(item_path)
+                if prev is not None and list(prev) == stamp:
                     continue
 
                 records, scan_ok = scan_item(cat, item_path)
@@ -411,7 +423,7 @@ def sweep(seen):
                     write_results(files)
 
                 if scan_ok:
-                    seen[item_path] = sig
+                    seen[item_path] = stamp
                     save_seen(seen)
                 # else: leave seen unchanged so it retries next sweep.
 

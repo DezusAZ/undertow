@@ -27,6 +27,14 @@ try:                                    # DEBUG: `kill -USR1 <pid>` dumps all th
     faulthandler.register(signal.SIGUSR1)
 except Exception:
     pass
+try:
+    # Dump a Python traceback on SIGSEGV/SIGABRT/SIGBUS/SIGFPE. libtorrent is a C++
+    # extension: when it faults, the process dies with NO Python traceback at all, which
+    # made a real crash look like a silent exit. This turns that into a stack we can read
+    # (it only costs a signal handler; it does not slow anything down).
+    faulthandler.enable(all_threads=True)
+except Exception:
+    pass
 import http.cookiejar
 import urllib.request
 import urllib.error
@@ -234,6 +242,27 @@ def _resume_flags():
 
 _RESUME_FLAGS = _resume_flags()
 
+
+def _save_resume(h):
+    """Request resume data for a handle, but ONLY once it has metadata.
+
+    _RESUME_FLAGS asks libtorrent to embed the info-dict in the blob. On a magnet that
+    has not yet fetched metadata there IS no info-dict, and asking for one in
+    libtorrent 2.0.x can fault inside the C++ layer — observed as a silent
+    `python3 segfault ... in libstdc++` with no Python traceback, which killed the whole
+    app right after an /add. There is also nothing worth saving before metadata arrives,
+    so skipping is free. Never raises."""
+    try:
+        if not h.is_valid():
+            return False
+        st = h.status()
+        if not getattr(st, "has_metadata", False):
+            return False
+        h.save_resume_data(_RESUME_FLAGS)
+        return True
+    except Exception:
+        return False
+
 ses = None
 if PROTECTED:
     _s = {
@@ -310,10 +339,7 @@ def monitor():
                         _save_state()
                     if not s.paused:
                         h.pause()
-                        try:
-                            h.save_resume_data(_RESUME_FLAGS)   # persist completed state
-                        except Exception:
-                            pass
+                        _save_resume(h)          # persist completed state (guarded)
                 elif s.paused and not t["user_paused"] and not t.get("finished"):
                     # `finished` is checked as well as is_finished: right after a restart
                     # libtorrent may still report is_finished False for a complete torrent,
@@ -345,10 +371,7 @@ def add_magnet(magnet, cat):
     with _lock:
         _torrents[ih] = {"h": h, "cat": cat, "user_paused": False, "finished": False}
     _save_state()
-    try:
-        h.save_resume_data(_RESUME_FLAGS)   # checkpoint once metadata arrives
-    except Exception:
-        pass
+    _save_resume(h)      # no-op until metadata arrives (see _save_resume)
     return ih
 
 
@@ -404,10 +427,7 @@ def add_torrent_url(url, cat):
     with _lock:
         _torrents[ih] = {"h": h, "cat": cat, "user_paused": False, "finished": False}
     _save_state()
-    try:
-        h.save_resume_data(_RESUME_FLAGS)
-    except Exception:
-        pass
+    _save_resume(h)
     return ih
 
 
@@ -574,11 +594,7 @@ def resume_saver():
         with _lock:
             handles = [t["h"] for t in _torrents.values()]
         for h in handles:
-            try:
-                if h.is_valid():
-                    h.save_resume_data(_RESUME_FLAGS)
-            except Exception:
-                pass
+            _save_resume(h)
         _save_state()
 
 
@@ -2709,10 +2725,7 @@ def _graceful_shutdown(*_):
         with _lock:
             handles = [t["h"] for t in _torrents.values()]
         for h in handles:
-            try:
-                h.save_resume_data(_RESUME_FLAGS)
-            except Exception:
-                pass
+            _save_resume(h)           # guarded: skips metadata-less magnets
         time.sleep(3)                 # let alert_pump flush the .resume blobs
     finally:
         os._exit(0)
