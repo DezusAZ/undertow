@@ -89,6 +89,16 @@ def is_enabled():
 _warming = threading.Event()   # set while a background warm-up is loading the model into VRAM
 
 
+def _wait_reachable(cfg, seconds):
+    """Block until the on-demand AI answers, or `seconds` elapse. Returns True if up."""
+    deadline = time.time() + max(0, seconds)
+    while time.time() < deadline:
+        if _reachable(cfg):
+            return True
+        time.sleep(3)
+    return False
+
+
 def _reachable(cfg, t=3):
     try:
         urllib.request.urlopen(cfg["url"].rstrip("/") + "/api/tags", timeout=t)
@@ -204,12 +214,25 @@ def _chat(system, user, timeout=45, want_json=False, options=None):
         body["options"] = options
     if want_json:
         body["format"] = "json"
-    try:
+    def _try(t):
         req = urllib.request.Request(
             cfg["url"].rstrip("/") + "/api/chat",
             json.dumps(body).encode(), {"Content-Type": "application/json"})
-        d = json.load(urllib.request.urlopen(req, timeout=timeout))
+        d = json.load(urllib.request.urlopen(req, timeout=t))
         return (d.get("message") or {}).get("content", "") or ""
+
+    try:
+        return _try(timeout)
+    except Exception:
+        pass
+    # The local AI is started ON DEMAND: it shuts down after ~15 min idle to keep the GPU
+    # cold, and the watchdog only notices the wake() above on its next ~15s cycle. So the
+    # FIRST request after an idle period always hit a dead server and returned "" — which
+    # the UI rendered as nothing happening at all. Wait for it to come up, then retry once.
+    if not _wait_reachable(cfg, 75):
+        return ""
+    try:
+        return _try(timeout)
     except Exception:
         return ""
 

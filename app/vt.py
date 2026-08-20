@@ -477,6 +477,82 @@ def add_nzb(nzb_id, cat):
     return True
 
 
+def _sab_api(mode, extra=None, timeout=12):
+    """Call SABnzbd's JSON API. Returns {} on any failure (never raises)."""
+    if not SAB_APIKEY:
+        return {}
+    q = {"mode": mode, "output": "json", "apikey": SAB_APIKEY}
+    q.update(extra or {})
+    try:
+        return json.load(urllib.request.urlopen(
+            SAB_URL + "/api?" + urlencode(q), timeout=timeout)) or {}
+    except Exception:
+        return {}
+
+
+def usenet_snapshot():
+    """Usenet transfers, shaped like the torrent rows the Downloads tab already draws.
+
+    Without this, an NZB handed to SABnzbd was completely invisible: /add returned
+    "added" and then nothing ever appeared, with no way to see progress or cancel it.
+    Includes items still being unpacked/repaired after the download finishes, because
+    that stage can take minutes and the file is not usable yet.
+    """
+    out = []
+    if not SAB_APIKEY:
+        return out
+    q = _sab_api("queue").get("queue", {}) or {}
+    for s in (q.get("slots") or []):
+        try:
+            pct = float(s.get("percentage") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        paused = str(s.get("status", "")).lower() == "paused"
+        out.append({
+            "id": s.get("nzo_id", ""),
+            "name": s.get("filename") or s.get("nzo_id") or "(usenet)",
+            "cat": s.get("cat") or "other",
+            "progress": round(pct, 1),
+            "state": "Paused" if paused else "Downloading",
+            "paused": paused,
+            "eta": s.get("timeleft") or "",
+            "size": s.get("size") or "",
+            "done": False,
+        })
+    # History rows that are NOT finished yet are still work in progress (Extracting,
+    # Repairing, Verifying...). A completed row is dropped: it is in the Library now.
+    h = _sab_api("history", {"limit": 25}).get("history", {}) or {}
+    for s in (h.get("slots") or []):
+        st = str(s.get("status") or "")
+        if st.lower() in ("completed", "failed"):
+            if st.lower() == "failed":
+                out.append({"id": s.get("nzo_id", ""),
+                            "name": s.get("name") or "(usenet)",
+                            "cat": s.get("category") or "other",
+                            "progress": 0, "state": "Failed",
+                            "error": (s.get("fail_message") or "")[:160],
+                            "paused": False, "eta": "", "size": s.get("size") or "",
+                            "done": True})
+            continue
+        out.append({"id": s.get("nzo_id", ""),
+                    "name": s.get("name") or "(usenet)",
+                    "cat": s.get("category") or "other",
+                    "progress": 100, "state": st or "Processing",
+                    "paused": False, "eta": "", "size": s.get("size") or "",
+                    "done": False})
+    return out
+
+
+def usenet_remove(nzo_id, delete_files=False):
+    """Cancel a usenet job. Tries the queue first, then history (post-processing)."""
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", nzo_id or ""):
+        return False
+    d = "1" if delete_files else "0"
+    r1 = _sab_api("queue", {"name": "delete", "value": nzo_id, "del_files": d})
+    r2 = _sab_api("history", {"name": "delete", "value": nzo_id, "del_files": d})
+    return bool(r1.get("status") or r2.get("status"))
+
+
 def remove(ih, delete_files=False):
     if not re.fullmatch(r'[0-9a-fA-F]{40,64}', ih or ''):   # only real info-hashes touch the fs
         return
@@ -1683,9 +1759,22 @@ if(!AI_READY){var ok=await ensureAiReady(function(secs){btn.textContent='✨ wak
   if(!ok){btn.disabled=false;btn.textContent='✨ Explain';return;}
   btn.textContent='✨ …';}
 try{var ctx=(t.source?('Source: '+t.source):'')+(t.category?(' · Type: '+t.category):'')+(t.size?(' · '+fmt(t.size)):'');
-var r=await fetch('/ai/explain',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t.title,context:ctx})});var s=await r.json();
-var box=document.getElementById('aibox'+i);if(box){box.textContent=s.text||'(no explanation available)';box.hidden=false;}
-btn.textContent='✨ Explained';}catch(e){btn.disabled=false;btn.textContent='✨ Explain';}}
+var r=await fetch('/ai/explain',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t.title,context:ctx})});
+var box=document.getElementById('aibox'+i);
+if(!r.ok){
+  // Never fail silently: the old code reset the button on ANY error, so a 403 or a
+  // timeout looked exactly like "nothing happened" and there was nothing to report.
+  var why=r.status===403?'the browser blocked the request — reload the page (Ctrl+Shift+R)'
+        :r.status===401?'your session expired — reload and log in'
+        :('the server returned '+r.status);
+  if(box){box.textContent='Could not explain: '+why;box.hidden=false;}
+  btn.disabled=false;btn.textContent='✨ Explain';return;}
+var s=await r.json();
+if(box){box.textContent=s.text||s.error||'(the local AI returned nothing — check the Engines tab)';box.hidden=false;}
+btn.textContent='✨ Explained';}
+catch(e){var box2=document.getElementById('aibox'+i);
+  if(box2){box2.textContent='Could not reach the AI: '+(e&&e.message?e.message:e);box2.hidden=false;}
+  btn.disabled=false;btn.textContent='✨ Explain';}}
 async function search(e){e.preventDefault();let q=document.getElementById('q').value.trim();if(!q||!VPN)return;
 let el=document.getElementById('results');el.innerHTML='<div class=empty>Searching dozens of sources…</div>';
 let cat=document.getElementById('cat').value;
@@ -1716,13 +1805,29 @@ return '<div class=t><div class=tn>'+esc(t.title)+'</div>'+
 '<span id=live'+i+' style="font-weight:600" title="liveness — is this actually retrievable right now?"></span>'+
 (t.size?'<span>'+fmt(t.size)+'</span>':'')+qual+dt+xp+act+'</div>'+
 '<div class=aibox id=aibox'+i+' hidden></div></div>';}).join('');LIVE_GEN++;liveCheck(LIVE_GEN);}
-async function dl(i,btn){btn.disabled=true;btn.textContent='Added ✓';var t=R[i];
+async function dl(i,btn){var t=R[i];btn.disabled=true;
+// Say "Adding…" until the server actually confirms. This used to print "Added ✓"
+// before the request was even sent, so a rejected add — or a usenet job that never
+// appeared — still looked successful, with nothing to act on.
+btn.textContent='Adding…';
 var body='cat='+encodeURIComponent(document.getElementById('cat').value);
 if(t.magnet)body+='&magnet='+encodeURIComponent(t.magnet);
 else if(t.torrent_url)body+='&torrent_url='+encodeURIComponent(t.torrent_url);
 else if(t.nzb_id)body+='&nzb_id='+encodeURIComponent(t.nzb_id);
-var res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
-if(!res.ok){btn.disabled=false;btn.textContent='⚠ Retry';}
+try{
+  var res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
+  if(!res.ok){
+    var msg='';try{msg=(await res.text()).slice(0,140);}catch(e){}
+    btn.disabled=false;btn.textContent='⚠ Retry';
+    if(msg)btn.title=msg;
+    alert('Could not add it: '+(msg||('server returned '+res.status)));
+  } else {
+    btn.textContent='Added ✓';
+    // Usenet hands off to SABnzbd, so it shows up under Downloads as a "usenet" row
+    // rather than in the torrent engine — nudge the user to look there.
+    if(t.nzb_id)btn.title='Sent to the Usenet downloader — see the Downloads tab';
+  }
+}catch(e){btn.disabled=false;btn.textContent='⚠ Retry';alert('Could not reach the server to add it.');}
 tick()}
 async function tick(){let r=await fetch('/status');if(r.status==401){location.href='/login';return}let d=await r.json();
 VPN=d.vpn;let v=document.getElementById('vpn');
@@ -1730,10 +1835,25 @@ if(d.vpn){v.className='vpn ok';v.innerHTML='<span><b>Protected</b> — traffic r
 else{v.className='vpn bad';v.innerHTML='<span><b>VPN not connected</b> — downloads are disabled until the tunnel is up.</span>'}
 document.getElementById('go').disabled=!d.vpn;
 let L=document.getElementById('list');
-var dc=document.getElementById('dlcount');if(dc)dc.textContent=d.torrents.length?'('+d.torrents.length+')':'';
-document.getElementById('dlempty').style.display=d.torrents.length?'none':'block';
-if(!d.torrents.length){L.innerHTML='';return}
-L.innerHTML=d.torrents.map(t=>{let done=t.finished;let col=done?'#3fb950':(t.state[0]=='P'?'#8b949e':'#238636');
+var UN=d.usenet||[];var TOT=d.torrents.length+UN.length;
+var dc=document.getElementById('dlcount');if(dc)dc.textContent=TOT?'('+TOT+')':'';
+document.getElementById('dlempty').style.display=TOT?'none':'block';
+if(!TOT){L.innerHTML='';return}
+// Usenet transfers live in SABnzbd, not in the torrent engine. They used to be
+// invisible here — "added" and then nothing — so render them in the same list.
+var uh=UN.map(u=>{var failed=u.state==='Failed';
+var col=failed?'#f85149':(u.paused?'#8b949e':'#238636');
+var acts='<button class=sec onclick="nzbDel(\''+u.id+'\',0)">✕ Remove</button>'+
+         '<button class=sec onclick="nzbDel(\''+u.id+'\',1)">🗑 Remove + delete files</button>';
+return '<div class=t><div class=tn>'+esc(u.name)+'</div>'+
+'<div class=bar><div class=fill style="width:'+u.progress+'%;background:'+col+'"></div></div>'+
+'<div class=meta><span class=tag>usenet</span><span class=tag>'+esc(u.cat)+'</span>'+
+'<span>'+u.progress+'% · '+esc(u.state)+'</span>'+
+(u.size?'<span>'+esc(String(u.size))+'</span>':'')+
+(u.eta?'<span>ETA '+esc(u.eta)+'</span>':'')+
+(u.error?'<span style="color:#f85149">'+esc(u.error)+'</span>':'')+
+'</div><div class=acts>'+acts+'</div></div>';}).join('');
+L.innerHTML=uh+d.torrents.map(t=>{let done=t.finished;let col=done?'#3fb950':(t.state[0]=='P'?'#8b949e':'#238636');
 let b='';
 if(done){b=`<button class=sec onclick="rc('${t.ih}')">↻ Recheck</button>`;}
 else if(t.upaused){b=`<button class=sec onclick="rs('${t.ih}')" ${VPN?'':'disabled'}>▶ Resume</button><button class=sec onclick="rc('${t.ih}')">↻ Recheck</button>`;}
@@ -1744,6 +1864,13 @@ return `<div class=t><div class=tn>${esc(t.name)}</div>
 <div class=meta><span class=tag>${t.cat}</span><span>${t.progress}% · ${t.state}</span>
 <span>${fmt(t.done)} / ${fmt(t.size)}</span><span>↓ ${rate(t.dl)}</span><span>${t.peers} peers</span></div>
 <div class=acts>${b}</div></div>`}).join('')}
+async function nzbDel(id,withFiles){
+  if(withFiles && !confirm('Remove this usenet download AND delete its files?'))return;
+  try{var r=await fetch('/nzb/remove?id='+encodeURIComponent(id)+'&delete='+(withFiles?1:0),{method:'POST'});
+    var j=await r.json();
+    if(!j.ok)alert('Could not remove it — SABnzbd refused. It may have already finished.');
+  }catch(e){alert('Could not reach the downloader to remove it.');}
+  tick();}
 var HUNT_EXPANDED={};var HUNT_RES={};var huntTimer=null;
 function huntTabActive(){var p=document.getElementById('tab-hunt');return p&&!p.hidden;}
 async function createHunt(e){e.preventDefault();var g=document.getElementById('hgoal').value.trim();if(!g)return;
@@ -2472,7 +2599,9 @@ class H(BaseHTTPRequestHandler):
                        "application/json")
         elif path == "/status":
             self._send(200, json.dumps({"vpn": vpn_ok, "ip": VPN_IP,
-                                        "torrents": snapshot()}), "application/json")
+                                        "torrents": snapshot(),
+                                        "usenet": usenet_snapshot()}),
+                       "application/json")
         elif path == "/search":
             qs = parse_qs(urlparse(self.path).query)
             q = (qs.get("q") or [""])[0].strip()
@@ -2728,6 +2857,13 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._send(200, json.dumps(res), "application/json")
+        elif path == "/nzb/remove":
+            # cancel a usenet transfer (queue or post-processing)
+            qs = parse_qs(urlparse(self.path).query)
+            nid = (qs.get("id") or [""])[0]
+            dele = (qs.get("delete") or ["0"])[0] == "1"
+            self._send(200, json.dumps({"ok": usenet_remove(nid, dele)}),
+                       "application/json")
         elif path == "/pause":
             pause(self._ih())
             self._send(200, "ok")
