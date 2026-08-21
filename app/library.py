@@ -672,14 +672,28 @@ _NVENC_OK = None
 
 
 def _have_nvenc():
+    """True only if NVENC can ACTUALLY encode right now.
+
+    Checking that ffmpeg lists h264_nvenc is not enough: a container keeps its device
+    nodes but its injected driver libraries go stale after a host driver update, so the
+    encoder is listed while CUDA fails with "no CUDA-capable device". That made the app
+    report mode "gpu-transcode" and then fail every time. So we run a real 2-frame
+    encode once and believe the result.
+    """
     global _NVENC_OK
     if _NVENC_OK is None:
         try:
-            out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                 timeout=20).stdout.decode("utf-8", "replace")
-            _NVENC_OK = "h264_nvenc" in out
-        except Exception:
+            r = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "testsrc=size=256x256:rate=1", "-frames:v", "2",
+                 "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-f", "null", "-"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+            _NVENC_OK = (r.returncode == 0)
+            if not _NVENC_OK:
+                print("[library] NVENC unavailable, using CPU: %s"
+                      % r.stderr.decode("utf-8", "replace").strip()[-200:], flush=True)
+        except Exception as e:
+            print("[library] NVENC probe failed (%s) — using CPU" % e, flush=True)
             _NVENC_OK = False
     return _NVENC_OK
 
@@ -699,6 +713,8 @@ _PREP_STALL_SECS = int(os.environ.get("PREP_STALL_SECS", "900"))   # kill a prep
 _KEY_RE = re.compile(r"^[0-9a-f]{20}$")
 _prep_lock = threading.Lock()
 _prep_jobs = {}                                        # key -> True while a prep runs
+_prep_procs = {}                                       # key -> live ffmpeg Popen (for cancel)
+_prep_cancelled = set()                                # keys the user aborted
 
 
 def _ffprobe1(path, entry, stream=None):
@@ -827,6 +843,73 @@ def read_status(key):
     return d
 
 
+def _run_prep(cmd, key, mode, dur, tmp):
+    """Run one ffmpeg prepare, reporting progress and capturing stderr.
+
+    Both the GPU attempt and the CPU fallback go through here. The fallback used to be a
+    plain blocking subprocess.run() with no -progress, so during a CPU retry the UI sat
+    at "0%" for the entire encode with no way to tell whether it was working or hung —
+    which is exactly what it looked like to the user.
+
+    Returns (returncode, last stderr lines).
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with _prep_lock:
+        _prep_procs[key] = proc
+    err_tail = []
+
+    def _drain_err(pipe, sink):
+        try:
+            for ln in pipe:
+                ln = ln.decode("utf-8", "replace").rstrip()
+                if ln:
+                    sink.append(ln)
+                    del sink[:-12]
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain_err, args=(proc.stderr, err_tail), daemon=True).start()
+
+    stop_wd = threading.Event()
+
+    def _watchdog():
+        last_sz, last_change = -1, time.time()
+        while not stop_wd.wait(30):
+            try:
+                sz = os.path.getsize(tmp)
+            except OSError:
+                sz = -1
+            now = time.time()
+            if sz != last_sz:
+                last_sz, last_change = sz, now
+            elif now - last_change > _PREP_STALL_SECS:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+    _write_status(key, {"state": "preparing", "progress": 0, "mode": mode})
+    try:
+        for line in proc.stdout:
+            line = line.decode("utf-8", "replace").strip()
+            if line.startswith("out_time_ms=") and dur > 0:
+                try:
+                    pct = min(99, int(int(line.split("=", 1)[1]) / 1e6 / dur * 100))
+                    _write_status(key, {"state": "preparing", "progress": pct,
+                                        "mode": mode})
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    proc.wait()
+    stop_wd.set()
+    with _prep_lock:
+        _prep_procs.pop(key, None)
+    return proc.returncode, err_tail
+
+
 def _prep_worker(real, key, dur, plan="transcode"):
     out, tmp = _out_path(key), _out_path(key) + ".part"
     try:
@@ -859,97 +942,57 @@ def _prep_worker(real, key, dur, plan="transcode"):
                 "-progress", "pipe:1", "-protocol_whitelist", "file,pipe"]
                + pre + ["-i", real] + vmap + amap
                + ["-dn", "-sn", "-movflags", "+faststart", "-f", "mp4", "-y", tmp])
-        # stderr is CAPTURED, not discarded: swallowing it is what hid
-        # "[h264_nvenc] 10 bit encode not supported" and turned a hard encoder failure
-        # into a silent black-video file.
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        _err_tail = []
-        def _drain_err(pipe, sink):
-            try:
-                for ln in pipe:
-                    ln = ln.decode("utf-8", "replace").rstrip()
-                    if ln:
-                        sink.append(ln)
-                        del sink[:-12]        # keep only the last few lines
-            except Exception:
-                pass
-        threading.Thread(target=_drain_err, args=(proc.stderr, _err_tail),
-                         daemon=True).start()
-        # watchdog: kill a prep whose output stops growing for _PREP_STALL_SECS (a hung
-        # decode emits no -progress AND doesn't grow the .part) so it can't pin a thread.
-        stop_wd = threading.Event()
+        rc, _err_tail = _run_prep(cmd, key, mode, dur, tmp)
 
-        def _watchdog():
-            last_sz, last_change = -1, time.time()
-            while not stop_wd.wait(30):
-                try:
-                    sz = os.path.getsize(tmp)
-                except OSError:
-                    sz = -1
-                now = time.time()
-                if sz != last_sz:
-                    last_sz, last_change = sz, now
-                elif now - last_change > _PREP_STALL_SECS:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                    return
-        threading.Thread(target=_watchdog, daemon=True).start()
-        for line in proc.stdout:                                     # parse -progress
-            line = line.decode("utf-8", "replace").strip()
-            if line.startswith("out_time_ms=") and dur > 0:
-                try:
-                    pct = min(99, int(int(line.split("=", 1)[1]) / 1e6 / dur * 100))
-                    _write_status(key, {"state": "preparing", "progress": pct, "mode": mode})
-                except Exception:
-                    pass
-        proc.wait()
-        stop_wd.set()
-        if proc.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+        if rc == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
             os.replace(tmp, out)
             _write_status(key, {"state": "ready", "progress": 100, "mode": mode})
-        else:
-            why = " | ".join(_err_tail[-4:]) if _err_tail else "no error output"
-            print("[library] prepare failed (%s) for %s: %s"
-                  % (mode, os.path.basename(real), why[:400]), flush=True)
+            return
+
+        why = " | ".join(_err_tail[-4:]) if _err_tail else "no error output"
+        print("[library] prepare failed (%s) for %s: %s"
+              % (mode, os.path.basename(real), why[:400]), flush=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+        # A GPU encode fails for reasons software encoding handles fine: no free NVENC
+        # session, a busy GPU, an unsupported pixel format, or — seen in the wild — a
+        # container whose injected driver libraries went stale after a host driver
+        # update, giving "CUDA_ERROR_NO_DEVICE" even though the GPU is healthy. Retry in
+        # software WITH progress reporting rather than declaring the file broken.
+        with _prep_lock:
+            was_cancelled = key in _prep_cancelled
+        if was_cancelled:
+            with _prep_lock:
+                _prep_cancelled.discard(key)
+            print("[library] prepare cancelled for %s" % os.path.basename(real), flush=True)
+            _write_status(key, {"state": "error", "error": "cancelled", "mode": "cancelled"})
+            return
+        if mode == "gpu-transcode":
+            print("[library] retrying %s with the CPU encoder"
+                  % os.path.basename(real), flush=True)
+            cpu_cmd = (["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                        "-progress", "pipe:1", "-protocol_whitelist", "file,pipe",
+                        "-i", real]
+                       + _venc_args(False) + amap
+                       + ["-dn", "-sn", "-movflags", "+faststart",
+                          "-f", "mp4", "-y", tmp])
+            rc2, err2 = _run_prep(cpu_cmd, key, "cpu-transcode", dur, tmp)
+            if rc2 == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                os.replace(tmp, out)
+                _write_status(key, {"state": "ready", "progress": 100,
+                                    "mode": "cpu-transcode"})
+                return
+            why = " | ".join(err2[-4:]) if err2 else why
+            print("[library] cpu retry also failed: %s" % why[:400], flush=True)
             try:
                 os.remove(tmp)
             except OSError:
                 pass
-            # A GPU encode can fail for reasons CPU encoding handles fine (unsupported
-            # pixel format, GPU busy, driver hiccup, no encode session free). Retry once
-            # in software rather than telling the user their file is broken.
-            retried = False
-            if use_gpu and mode == "gpu-transcode":
-                print("[library] retrying %s with the CPU encoder"
-                      % os.path.basename(real), flush=True)
-                _write_status(key, {"state": "preparing", "progress": 0,
-                                    "mode": "cpu-transcode"})
-                cpu_cmd = (["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-                            "-protocol_whitelist", "file,pipe", "-i", real]
-                           + _venc_args(False) + amap
-                           + ["-dn", "-sn", "-movflags", "+faststart",
-                              "-f", "mp4", "-y", tmp])
-                try:
-                    r2 = subprocess.run(cpu_cmd, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.PIPE)
-                    if r2.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-                        os.replace(tmp, out)
-                        _write_status(key, {"state": "ready", "progress": 100,
-                                            "mode": "cpu-transcode"})
-                        retried = True
-                    else:
-                        print("[library] cpu retry also failed: %s"
-                              % r2.stderr.decode("utf-8", "replace")[-300:], flush=True)
-                        try:
-                            os.remove(tmp)
-                        except OSError:
-                            pass
-                except Exception as e:
-                    print("[library] cpu retry error: %s" % e, flush=True)
-            if not retried:
-                _write_status(key, {"state": "error", "mode": mode, "error": why[:160]})
+
+        _write_status(key, {"state": "error", "mode": mode, "error": why[:200]})
     except Exception as e:
         try:
             os.remove(tmp)
@@ -960,6 +1003,24 @@ def _prep_worker(real, key, dur, plan="transcode"):
         with _prep_lock:
             _prep_jobs.pop(key, None)
         _cache_sweep()
+
+
+def cancel_prep(key):
+    """Abort an in-flight prepare. Without this a long transcode could only be waited
+    out — there was no way to stop it or reclaim the GPU/CPU."""
+    if not _KEY_RE.match(key or ""):
+        return False
+    with _prep_lock:
+        proc = _prep_procs.get(key)
+        _prep_cancelled.add(key)
+    if proc is None:
+        return False
+    try:
+        proc.kill()
+    except Exception:
+        return False
+    _write_status(key, {"state": "error", "error": "cancelled", "mode": "cancelled"})
+    return True
 
 
 def prepare_to_cache(real_path, caps=""):

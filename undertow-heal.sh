@@ -227,6 +227,40 @@ killswitch_guard() {
     fi
 }
 
+# --- TRANSCODER GPU INTEGRITY ------------------------------------------------------
+# The decode sandbox keeps its /dev/nvidia* nodes across a host driver update, but the
+# driver LIBRARIES injected at container-create time go stale — CUDA then fails with
+# "no CUDA-capable device is detected" even though the GPU is perfectly healthy. The
+# only fix is to recreate the container so the runtime re-injects current libraries.
+# Symptom if unhandled: every video "Couldn't prepare this file", or a silent fall back
+# to a much slower CPU encode. Checked rarely (it is a real encode) and only repaired
+# when the HOST GPU is confirmed working, so a machine with no GPU is never touched.
+GPU_TC_STATE="$COMPOSE_DIR/config/.transcoder_gpu_check"
+transcoder_gpu_guard() {
+    [ "$(docker inspect -f '{{.State.Running}}' vpntorrent-transcoder 2>/dev/null)" = "true" ] || return 0
+    # only relevant if this deployment asked for a GPU at all
+    docker inspect -f '{{json .HostConfig.DeviceRequests}}' vpntorrent-transcoder 2>/dev/null         | grep -q nvidia || return 0
+    now=$(date +%s 2>/dev/null || echo 0)
+    last=0
+    [ -f "$GPU_TC_STATE" ] && last=$(cat "$GPU_TC_STATE" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $((now - last)) -ge 900 ] || return 0          # at most once every 15 min
+    echo "$now" > "$GPU_TC_STATE" 2>/dev/null
+    if timeout 60 docker exec vpntorrent-transcoder ffmpeg -hide_banner -loglevel error             -f lavfi -i testsrc=size=256x256:rate=1 -frames:v 2 -c:v h264_nvenc             -pix_fmt yuv420p -f null - >/dev/null 2>&1; then
+        return 0                                     # GPU fine
+    fi
+    # Confirm the HOST GPU works before blaming the container — otherwise we would
+    # recreate it forever on a box whose GPU is genuinely absent or busy.
+    if ! timeout 60 docker run --rm --gpus all --entrypoint nvidia-smi             "$(docker inspect -f '{{.Config.Image}}' vpntorrent-transcoder 2>/dev/null)"             -L >/dev/null 2>&1; then
+        echo "transcoder: NVENC unusable and the host GPU is not available either — leaving it on CPU"
+        return 0
+    fi
+    echo "transcoder: GPU broken inside the container but healthy on the host -> recreating"
+    if [ -f "$COMPOSE_FILE" ]; then
+        docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --no-deps --no-build             --force-recreate transcoder >/dev/null 2>&1             && echo "transcoder: recreated (driver libraries re-injected)"
+    fi
+}
+
 # --- APP LIVENESS ------------------------------------------------------------------
 # The app process can be alive while the web UI is wedged (a stuck thread, an exhausted
 # handler pool). The container looks "running" and nothing recovers it. Probe the real HTTP
@@ -332,6 +366,7 @@ main=$(docker inspect -f '{{.State.StartedAt}}' vpntorrent 2>/dev/null)
 
 # Anonymity invariant first — it matters more than any availability concern.
 killswitch_guard
+transcoder_gpu_guard
 
 for dep in $DEPS; do
     c="vpntorrent-$dep"

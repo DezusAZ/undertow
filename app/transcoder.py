@@ -72,6 +72,8 @@ class H(BaseHTTPRequestHandler):
                 self._json({"state": "error", "error": "not found"}, 404)
                 return
             self._json(library.prepare_to_cache(real, caps))
+        elif u.path == "/prepcancel":
+            self._json({"ok": library.cancel_prep((qs.get("key") or [""])[0])})
         elif u.path == "/prepstatus":
             self._json(library.read_status((qs.get("key") or [""])[0]))
         elif u.path == "/touch":

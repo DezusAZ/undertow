@@ -1572,6 +1572,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 .lib-modal[hidden]{display:none}
 .lib-dialog{background:var(--surface);border:1px solid var(--hair2);border-radius:18px;width:100%;max-width:820px;box-shadow:0 30px 70px rgba(0,0,0,.7);position:relative;overflow:hidden}
 .lib-close{position:absolute;top:12px;right:12px;z-index:3;width:34px;height:34px;border-radius:50%;background:rgba(6,17,12,.8);border:1px solid var(--hair);color:var(--text);font-size:18px;line-height:1;cursor:pointer}
+.lib-back{position:absolute;top:10px;left:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#c9d1d9;border-radius:8px;padding:5px 11px;font:600 12px var(--font);cursor:pointer;z-index:2}.lib-back:hover{background:rgba(255,255,255,.12)}
 .lib-close:hover{background:var(--red);border-color:var(--red);color:#fff}
 .lib-dhead{display:flex;gap:18px;padding:20px}
 .lib-dposter{width:150px;flex:0 0 150px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--canvas)}
@@ -1585,6 +1586,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 .lib-player audio{background:var(--canvas)}
 .lib-transnote{color:var(--amber);font-size:12px;margin:8px 0 0}
 .lib-prep{margin:14px 20px;padding:16px;border:1px solid var(--hair);border-radius:12px;background:rgba(11,25,19,.5);color:#adc4b7;font-size:14px;text-align:center;line-height:1.6}
+.lib-prepbar{height:6px;border-radius:4px;background:rgba(255,255,255,.10);margin:9px 0 7px;overflow:hidden}.lib-prepbar>div{height:100%;background:#238636;transition:width .4s}
 .lib-prep small{color:var(--faint);font-size:12px}
 .lib-prep-err{color:#f8827b;border-color:rgba(248,81,73,.4)}
 .lib-spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(52,221,125,.3);border-top-color:var(--green);border-radius:50%;vertical-align:-2px;margin-right:6px;animation:libspin .8s linear infinite}
@@ -1630,12 +1632,12 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 <div class=sub>download-only · never seeds · saving to <code>__SAVE__</code></div>
 <div id=vpn class=vpn>checking VPN…</div>
 <div class=tabs>
-<button class="tabbtn active" data-tab=search onclick="showTab('search')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>Search</button>
-<button class="tabbtn" data-tab=sources onclick="showTab('sources')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18"/></svg>Sources</button>
-<button class="tabbtn" data-tab=hunt onclick="showTab('hunt')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 12 18.5 5.5"/></svg>Deep Hunt</button>
-<button class="tabbtn" data-tab=downloads onclick="showTab('downloads')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 19h16"/></svg>Downloads <span id=dlcount></span></button>
-<button class="tabbtn" data-tab=library onclick="showTab('library')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3Z"/></svg>Library</button>
-<button class="tabbtn" data-tab=engines onclick="showTab('engines')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6"/></svg>Engines</button>
+<button class="tabbtn active" data-tab=search onclick="navTo('search')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>Search</button>
+<button class="tabbtn" data-tab=sources onclick="navTo('sources')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18"/></svg>Sources</button>
+<button class="tabbtn" data-tab=hunt onclick="navTo('hunt')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 12 18.5 5.5"/></svg>Deep Hunt</button>
+<button class="tabbtn" data-tab=downloads onclick="navTo('downloads')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 19h16"/></svg>Downloads <span id=dlcount></span></button>
+<button class="tabbtn" data-tab=library onclick="navTo('library')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3Z"/></svg>Library</button>
+<button class="tabbtn" data-tab=engines onclick="navTo('engines')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6"/></svg>Engines</button>
 </div>
 <div id=tab-search class=tab-panel>
 <form class=search onsubmit="search(event)">
@@ -1692,7 +1694,8 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
   <div id="libGrid" class="lib-grid"></div>
   <div id="libModal" class="lib-modal" hidden onclick="libModalBgClose(event)">
     <div class="lib-dialog" role="dialog" aria-modal="true">
-      <button class="lib-close" onclick="libCloseModal()" aria-label="Close">✕</button>
+      <button class="lib-back" onclick="libBack()" aria-label="Back" title="Back to the library">← Back</button>
+      <button class="lib-close" onclick="libCloseModal()" aria-label="Close" title="Close">✕</button>
       <div id="libModalBody"></div>
     </div>
   </div>
@@ -1947,7 +1950,28 @@ if(!res.ok){btn.disabled=false;btn.textContent='⚠ Retry';}tick()}
 async function huntAct(hid,act){if(act==='delete'&&!confirm('Delete this hunt and all its accumulated results?'))return;
 try{await fetch('/hunt/'+act,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:hid})});}catch(e){}
 if(act==='delete'){delete HUNT_EXPANDED[hid];delete HUNT_RES[hid];}loadHunts();}
-function showTab(name){['search','sources','hunt','engines','downloads','library'].forEach(function(t){var p=document.getElementById('tab-'+t);if(p)p.hidden=(t!==name);var b=document.querySelector('.tabbtn[data-tab='+t+']');if(b)b.classList.toggle('active',t===name);});if(name==='library'&&!LIB_LOADED)loadLibrary();if(name==='engines'){loadEngines();loadAiSettings();loadNotifySettings();}if(name==='hunt'){loadHunts();if(!huntTimer)huntTimer=setInterval(function(){if(huntTabActive())loadHunts();},4000);}}
+var NAV_TABS=['search','sources','hunt','engines','downloads','library'];
+var _navBusy=false;
+// Tabs used to be pure JS with no URL, so the browser's Back button left the app
+// entirely and dumped you at the login page. Each tab is now a real history entry,
+// and the media dialog is one too, so Back does what Back should.
+function navTo(name){ if(location.hash.slice(1).split('/')[0]!==name){ location.hash=name; } else { showTab(name,true); } }
+function libBack(){ if(history.length>1){ history.back(); } else { libCloseModal(); } }
+window.addEventListener('hashchange',function(){ applyHash(); });
+function applyHash(){
+  if(_navBusy)return;
+  var raw=location.hash.slice(1);
+  var parts=raw.split('/');
+  var tab=parts[0];
+  var wantModal=(parts[1]==='play');
+  if(NAV_TABS.indexOf(tab)<0){ tab='search'; }
+  showTab(tab,true);
+  var modal=document.getElementById('libModal');
+  var modalOpen=modal && !modal.hidden;
+  if(modalOpen && !wantModal){ libCloseModal(true); }
+}
+function showTab(name,fromNav){['search','sources','hunt','engines','downloads','library'].forEach(function(t){var p=document.getElementById('tab-'+t);if(p)p.hidden=(t!==name);var b=document.querySelector('.tabbtn[data-tab='+t+']');if(b)b.classList.toggle('active',t===name);});if(name==='library'&&!LIB_LOADED)loadLibrary();if(name==='engines'){loadEngines();loadAiSettings();loadNotifySettings();}if(name==='hunt'){loadHunts();if(!huntTimer)huntTimer=setInterval(function(){if(huntTabActive())loadHunts();},4000);}
+if(!fromNav){_navBusy=true;try{if(location.hash.slice(1).split('/')[0]!==name){location.hash=name;}}finally{_navBusy=false;}}}
 async function loadEngines(){var el=document.getElementById('engines');el.innerHTML='<div class=empty>Checking engines…</div>';
 var r=await fetch('/engines');if(r.status==401){location.href='/login';return}
 var E=await r.json();
@@ -2222,6 +2246,12 @@ function libOpen(idx){
     + '<div class="lib-files"><h4>Files</h4>' + filesHtml + '</div>';
 
   modal.hidden = false;
+  // Give the dialog its own history entry so the browser's Back button (and Android's
+  // back gesture) closes it instead of navigating away from the app entirely.
+  try {
+    var base = (location.hash.slice(1).split('/')[0]) || 'library';
+    if (location.hash.slice(1) !== base + '/play') { location.hash = base + '/play'; }
+  } catch (e) {}
   document.addEventListener('keydown', libEscKey);
 }
 
@@ -2240,6 +2270,7 @@ async function libDelete(idx){
 function libPlay(idx, fileIdx){
   var it = LIB_ITEMS[idx];
   if (!it) return;
+  _prepLast = {idx: idx, fi: fileIdx};   // so the prepare panel can offer "VLC instead"
   var f = (it.files || [])[fileIdx];
   if (!f) return;
   var holder = document.getElementById('libPlayer');
@@ -2298,8 +2329,41 @@ function libMount(holder, tag, src){
 
 var _prepTimer = null;
 var _prepGen = 0;
+var _prepStart = 0;          // when the current prepare began (for the ETA)
+var _prepLast = {idx:-1, fi:-1};   // so "Play in VLC instead" knows which file
+
+function libDur(sec){
+  sec = Math.round(sec);
+  if (sec < 90) return sec + 's';
+  var m = Math.round(sec / 60);
+  if (m < 90) return m + ' min';
+  var h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+
+function libCancelPrep(key){
+  fetch('/prepcancel?key=' + encodeURIComponent(key), {method:'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      // Stop the poll loop either way: if the job had already finished there is nothing
+      // to kill, but the user still asked to stop watching it.
+      _prepGen++;
+      var holder = document.getElementById('libPlayer');
+      if (holder) holder.innerHTML = '<div class="lib-prep">Stopped.' +
+        '<br><small>Nothing was downloaded twice — press ▶ Play to start again, or use 📺 VLC / app.</small></div>';
+    })
+    .catch(function(){ _prepGen++; });
+}
+
+function libExternalFromPrep(){
+  if (_prepLast.idx >= 0) { _prepGen++; libExternal(_prepLast.idx, _prepLast.fi); }
+}
+
 function libPollPrep(holder, tag, key){
-  var lbl = { 'remux': 'Remuxing (your device decodes it)', 'gpu-transcode': 'Transcoding on the GPU' };
+  _prepStart = Date.now();
+  var lbl = { 'remux': 'Remuxing (your device decodes it)',
+              'gpu-transcode': 'Converting on the GPU',
+              'cpu-transcode': 'Converting on the CPU (no GPU available — slower)' };
   var myGen = _prepGen;            // a newer play/close invalidates this loop
   var idle = 0;                    // consecutive polls with no forward progress
   function tick(){
@@ -2307,9 +2371,29 @@ function libPollPrep(holder, tag, key){
     fetch('/prepstatus?key=' + encodeURIComponent(key)).then(function(r){return r.json();}).then(function(s){
       if (myGen !== _prepGen) return;
       if (s.state === 'ready') { libMount(holder, tag, '/playfile?key=' + encodeURIComponent(key)); return; }
-      if (s.state === 'error' || idle > 600) { holder.innerHTML = '<div class="lib-prep lib-prep-err">Couldn’t prepare this file — try 📺 VLC / app.</div>'; return; }
+      if (s.state === 'error' || idle > 600) {
+        var reason = (s.error === 'cancelled') ? 'Cancelled.'
+                   : ('Couldn’t prepare this file' + (s.error ? ': ' + libEsc(String(s.error)) : '') + '.');
+        holder.innerHTML = '<div class="lib-prep lib-prep-err">' + reason +
+          '<br><small>Try <b>📺 VLC / app</b> — it plays the original instantly at full quality.</small></div>';
+        return; }
       idle++;
-      holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> ' + (lbl[s.mode] || 'Preparing') + '… ' + (s.progress || 0) + '%<br><small>one-time — then it plays instantly with full seeking</small></div>';
+      // Show what it is doing, how far along, and an honest ETA — and always offer a way
+      // out. Previously this was a bare spinner at 0% with no cancel, so a stalled job
+      // was indistinguishable from a working one and could not be stopped.
+      var pct = s.progress || 0;
+      var eta = '';
+      if (pct > 0 && _prepStart) {
+        var el = (Date.now() - _prepStart) / 1000;
+        var left = el / pct * (100 - pct);
+        if (left > 5 && left < 86400) eta = ' · about ' + libDur(left) + ' left';
+      }
+      holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> ' +
+        (lbl[s.mode] || 'Preparing') + '… ' + pct + '%' + eta +
+        '<div class="lib-prepbar"><div style="width:' + pct + '%"></div></div>' +
+        '<small>One-time — then it plays instantly with full seeking.</small><br>' +
+        '<button class="sec" onclick="libCancelPrep(\'' + key + '\')">✕ Stop converting</button>' +
+        ' <button class="sec" onclick="libExternalFromPrep()">📺 Play in VLC instead</button></div>';
       _prepTimer = setTimeout(tick, 1500);
     }).catch(function(){ if (myGen === _prepGen) _prepTimer = setTimeout(tick, 2500); });
   }
@@ -2386,13 +2470,21 @@ function libStopMedia(){
   }
 }
 
-function libCloseModal(){
+function libCloseModal(fromNav){
   libStopMedia();
   var modal = document.getElementById('libModal');
   if (modal) modal.hidden = true;
   var body = document.getElementById('libModalBody');
   if (body) body.innerHTML = '';
   document.removeEventListener('keydown', libEscKey);
+  // Closing via ✕ or Escape should also unwind the history entry the dialog added,
+  // otherwise Back would "re-open" a dialog the user already dismissed.
+  if (!fromNav) {
+    try {
+      var h = location.hash.slice(1);
+      if (h.indexOf('/play') > 0) { history.back(); }
+    } catch (e) {}
+  }
 }
 
 function libModalBgClose(ev){
@@ -2406,6 +2498,13 @@ function libEscKey(ev){
 let mq=new URLSearchParams(location.search).get('magnet');
 if(mq){document.querySelector('details').open=true;document.getElementById('m').value=decodeURIComponent(mq);history.replaceState({},'','/')}
 tick();setInterval(tick,1500);refreshAi();
+// Restore whatever tab the URL points at, so a refresh or a shared link lands where you
+// were instead of always resetting to Search.
+applyHash();
+// Escape closes the dialog too (and unwinds its history entry).
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){var m=document.getElementById('libModal');if(m&&!m.hidden)libCloseModal();}
+});
 </script></body></html>"""
 PAGE = PAGE.replace("__SAVE__", SAVE).replace("__OPTS__", OPTS)
 
@@ -2857,6 +2956,17 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._send(200, json.dumps(res), "application/json")
+        elif path == "/prepcancel":
+            # Proxied on purpose: the ffmpeg process lives inside the decoder sandbox, so
+            # only that container can kill it (this one only reads status from /cache).
+            k = (parse_qs(urlparse(self.path).query).get("key") or [""])[0]
+            ok = False
+            try:
+                ok = bool(json.load(urllib.request.urlopen(
+                    TRANSCODER + "/prepcancel?key=" + quote(k), timeout=15)).get("ok"))
+            except Exception:
+                ok = False
+            self._send(200, json.dumps({"ok": ok}), "application/json")
         elif path == "/nzb/remove":
             # cancel a usenet transfer (queue or post-processing)
             qs = parse_qs(urlparse(self.path).query)
