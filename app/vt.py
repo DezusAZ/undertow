@@ -2309,13 +2309,95 @@ function libPlay(idx, fileIdx){
     return _libCaps;
   }
 
-  // codecs), then play it with full seeking. Your browser decodes it on your own GPU.
-  holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> Preparing for playback…</div>';
-  fetch('/prep?id=' + encodeURIComponent(it.id) + '&f=' + f.i + '&caps=' + encodeURIComponent(libCaps())).then(function(r){return r.json();}).then(function(d){
-    if (!d || d.state === 'error' || !d.key) { holder.innerHTML = '<div class="lib-prep lib-prep-err">Couldn’t prepare this file. Try 📺 VLC / app below.</div>'; return; }
-    if (d.state === 'ready') { libMount(holder, tag, '/playfile?key=' + encodeURIComponent(d.key)); return; }
-    libPollPrep(holder, tag, d.key);
-  }).catch(function(){ holder.innerHTML = '<div class="lib-prep lib-prep-err">Prepare failed — try 📺 VLC / app.</div>'; });
+  // Non-native container (mkv/avi/...). Ask the server what it would have to do:
+  //  - "remux": the browser can decode this video, so a container swap is enough. That
+  //    is quick and gives native byte-range seeking, so keep using the prepare path.
+  //  - anything else: it needs a real re-encode. Streaming it as HLS starts playing in
+  //    a couple of seconds and only ever encodes the part you actually watch, instead
+  //    of converting the whole film first (which took ~10 minutes for 1080p).
+  holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> Starting…</div>';
+  var q = 'id=' + encodeURIComponent(it.id) + '&f=' + f.i + '&caps=' + encodeURIComponent(libCaps());
+  fetch('/hls/start?' + q).then(function(r){ return r.json(); }).then(function(h){
+    if (h && h.sid && h.plan !== 'remux') { libMountHls(holder, tag, h); return; }
+    // remux (or HLS unavailable) -> the original prepare-then-play path
+    holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> Preparing for playback…</div>';
+    return fetch('/prep?' + q).then(function(r){return r.json();}).then(function(d){
+      if (!d || d.state === 'error' || !d.key) { holder.innerHTML = '<div class="lib-prep lib-prep-err">Couldn’t prepare this file. Try 📺 VLC / app below.</div>'; return; }
+      if (d.state === 'ready') { libMount(holder, tag, '/playfile?key=' + encodeURIComponent(d.key)); return; }
+      libPollPrep(holder, tag, d.key);
+    });
+  }).catch(function(){ holder.innerHTML = '<div class="lib-prep lib-prep-err">Could not start playback — try 📺 VLC / app.</div>'; });
+}
+
+var _hlsObj = null, _hlsSid = null;
+
+function libStopHls(){
+  if (_hlsObj) { try { _hlsObj.destroy(); } catch(e){} _hlsObj = null; }
+  if (_hlsSid) {
+    // Free the encoder immediately rather than waiting for the idle reaper.
+    try { fetch('/hls/stop?sid=' + encodeURIComponent(_hlsSid), {method:'POST'}); } catch(e){}
+    _hlsSid = null;
+  }
+}
+
+function libLoadScript(src, cb){
+  if (window.Hls) { cb(); return; }
+  var sc = document.createElement('script');
+  sc.src = src;
+  sc.onload = function(){ cb(); };
+  sc.onerror = function(){ cb(new Error('could not load the HLS player')); };
+  document.head.appendChild(sc);
+}
+
+function libMountHls(holder, tag, h){
+  var url = '/hls/playlist?sid=' + encodeURIComponent(h.sid);
+  _hlsSid = h.sid;
+  var el = document.createElement(tag);
+  el.controls = true; el.autoplay = true; el.setAttribute('playsinline', '');
+  el.style.width = '100%';
+  holder.innerHTML = '';
+  holder.appendChild(el);
+  libMediaEl = el;
+
+  var note = document.createElement('div');
+  note.className = 'lib-prep';
+  note.style.marginTop = '8px';
+  note.innerHTML = 'Streaming live — converting only what you watch' +
+    (h.mode === 'hls-cpu' ? ' (CPU — no GPU available)' : '') +
+    '. <small>Seeking works; jumping far ahead pauses a moment while it catches up.</small>';
+  holder.appendChild(note);
+
+  // Safari plays HLS natively; everyone else needs hls.js, which we serve ourselves.
+  if (el.canPlayType('application/vnd.apple.mpegurl')) { el.src = url; return; }
+
+  libLoadScript('/hls.min.js', function(err){
+    if (err || !window.Hls || !window.Hls.isSupported()) {
+      holder.innerHTML = '<div class="lib-prep lib-prep-err">This browser cannot stream this format.' +
+        '<br><small>Use <b>📺 VLC / app</b> — it plays the original at full quality.</small></div>';
+      return;
+    }
+    // Segments are produced on demand, so a cold one can take a few seconds. The stock
+    // 20s timeouts would abort mid-encode and look like a broken video.
+    var hls = new Hls({
+      manifestLoadingTimeOut: 60000,
+      fragLoadingTimeOut: 180000,
+      fragLoadingMaxRetry: 4,
+      maxBufferLength: 30,          // ~5 segments ahead: enough buffer, no runaway encode
+      maxMaxBufferLength: 60,
+      enableWorker: true
+    });
+    _hlsObj = hls;
+    hls.loadSource(url);
+    hls.attachMedia(el);
+    hls.on(Hls.Events.ERROR, function(evt, data){
+      if (!data || !data.fatal) return;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { try { hls.startLoad(); return; } catch(e){} }
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR)   { try { hls.recoverMediaError(); return; } catch(e){} }
+      holder.innerHTML = '<div class="lib-prep lib-prep-err">Streaming stopped: ' +
+        libEsc(String((data.details || data.type || 'unknown'))) +
+        '<br><small>Try <b>📺 VLC / app</b>, which needs no conversion at all.</small></div>';
+    });
+  });
 }
 
 function libMount(holder, tag, src){
@@ -2460,6 +2542,7 @@ function libDownloadPlaylist(){
 }
 
 function libStopMedia(){
+  libStopHls();
   if (typeof _prepGen !== 'undefined') _prepGen++;   // invalidate any running prep-poll loop
   if (typeof _prepTimer !== 'undefined' && _prepTimer) { clearTimeout(_prepTimer); _prepTimer = null; }
   if (libMediaEl) {
@@ -2675,6 +2758,61 @@ class H(BaseHTTPRequestHandler):
             else:
                 _maybe_touch(key)          # keep it out of the LRU eviction path while watched
                 library.stream_file(self, cf)
+        elif path == "/hls.min.js":
+            # Vendored player library. Chrome/Edge/Firefox cannot play HLS natively, and
+            # we deliberately do NOT pull it from a CDN: Undertow must work offline and
+            # must not tell a third party which box is streaming.
+            try:
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "static", "hls.min.js"), "rb") as f:
+                    body = f.read()
+                self._send(200, body, "application/javascript; charset=utf-8",
+                           [("Cache-Control", "public, max-age=604800")])
+            except Exception:
+                self._send(404, "not found", "text/plain")
+        elif path == "/hls/start":
+            if not self._authed():
+                self._send(401, "auth required", "text/plain"); return
+            qs = parse_qs(urlparse(self.path).query)
+            p = library.resolve_file((qs.get("id") or [""])[0],
+                                     (qs.get("f") or ["0"])[0])
+            if not p:
+                self._send(404, "not found", "text/plain"); return
+            caps = (qs.get("caps") or [""])[0]
+            try:
+                r = urllib.request.urlopen(
+                    TRANSCODER + "/hls/start?path=" + quote(p) + "&caps=" + quote(caps),
+                    timeout=45).read()
+            except Exception as e:
+                r = json.dumps({"error": str(e)[:120]}).encode()
+            self._send(200, r, "application/json")
+        elif path == "/hls/playlist":
+            if not self._authed():
+                self._send(401, "auth required", "text/plain"); return
+            sid = (parse_qs(urlparse(self.path).query).get("sid") or [""])[0]
+            try:
+                up = urllib.request.urlopen(TRANSCODER + "/hls/playlist?sid=" + quote(sid),
+                                            timeout=30)
+                self._send(200, up.read(), "application/vnd.apple.mpegurl")
+            except Exception:
+                self._send(404, "no such session", "text/plain")
+        elif path == "/hls/segment":
+            if not self._authed():
+                self._send(401, "auth required", "text/plain"); return
+            qs = parse_qs(urlparse(self.path).query)
+            sid = (qs.get("sid") or [""])[0]
+            n = (qs.get("n") or [""])[0]
+            try:
+                # generous: a cold segment means an encoder start + a few seconds of video
+                up = urllib.request.urlopen(
+                    TRANSCODER + "/hls/segment?sid=" + quote(sid) + "&n=" + quote(n),
+                    timeout=120)
+                self._send(200, up.read(), "video/mp2t",
+                           [("Cache-Control", "private, max-age=3600")])
+            except urllib.error.HTTPError as e:
+                self._send(e.code, e.read() or b"segment unavailable", "application/json")
+            except Exception as e:
+                self._send(504, json.dumps({"error": str(e)[:120]}), "application/json")
         elif path == "/prepstatus":
             if not self._authed():
                 self._send(401, "auth required", "text/plain")
@@ -2956,6 +3094,17 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._send(200, json.dumps(res), "application/json")
+        elif path == "/hls/stop":
+            # Free the encoder as soon as the player goes away, instead of waiting for
+            # the idle reaper — a GPU session left running is a real cost.
+            sid = (parse_qs(urlparse(self.path).query).get("sid") or [""])[0]
+            ok = False
+            try:
+                ok = bool(json.load(urllib.request.urlopen(
+                    TRANSCODER + "/hls/stop?sid=" + quote(sid), timeout=15)).get("ok"))
+            except Exception:
+                ok = False
+            self._send(200, json.dumps({"ok": ok}), "application/json")
         elif path == "/prepcancel":
             # Proxied on purpose: the ffmpeg process lives inside the decoder sandbox, so
             # only that container can kill it (this one only reads status from /cache).

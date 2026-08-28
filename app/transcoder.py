@@ -18,6 +18,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import library
+import hls
 
 SAVE = os.environ.get("SAVE_PATH", "/downloads")
 PORT = int(os.environ.get("TPORT", "8723"))
@@ -72,6 +73,41 @@ class H(BaseHTTPRequestHandler):
                 self._json({"state": "error", "error": "not found"}, 404)
                 return
             self._json(library.prepare_to_cache(real, caps))
+        elif u.path == "/hls/start":
+            path = (qs.get("path") or [""])[0]
+            caps = re.sub(r"[^a-z0-9,]", "", (qs.get("caps") or [""])[0].lower())[:120]
+            real = _safe(path) if path else None
+            if not real:
+                self._json({"error": "not found"}, 404); return
+            r = hls.start(real, caps)
+            self._json(r or {"error": "unsupported"}, 200 if r else 415)
+        elif u.path == "/hls/playlist":
+            pl = hls.playlist((qs.get("sid") or [""])[0])
+            if pl is None:
+                self._json({"error": "no such session"}, 404); return
+            b = pl.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+        elif u.path == "/hls/segment":
+            sid = (qs.get("sid") or [""])[0]
+            try:
+                n = int((qs.get("n") or ["-1"])[0])
+            except ValueError:
+                n = -1
+            data, err = hls.segment(sid, n)
+            if data is None:
+                self._json({"error": err or "unavailable"}, 404); return
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.end_headers()
+            self.wfile.write(data)
+        elif u.path == "/hls/stop":
+            self._json({"ok": hls.stop((qs.get("sid") or [""])[0])})
         elif u.path == "/prepcancel":
             self._json({"ok": library.cancel_prep((qs.get("key") or [""])[0])})
         elif u.path == "/prepstatus":
@@ -95,4 +131,5 @@ if __name__ == "__main__":
     library.cache_reaper()          # clear crash debris (orphaned .part / stuck 'preparing')
     print(f"[transcoder] sandboxed decoder on http://0.0.0.0:{PORT} (reads {SAVE} ro)",
           flush=True)
+    hls.init()          # session dirs + the idle/stale housekeeper
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
