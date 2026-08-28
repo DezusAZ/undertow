@@ -25,6 +25,29 @@ PROJECT="vpntorrent"
 COMPOSE_DIR="${COMPOSE_DIR:-/DATA/projects/vpntorrent}"
 COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
 
+# The deployment may layer overlays on the base file (e.g. docker-compose.gpu.yml for
+# NVENC), listed colon-separated in .env as COMPOSE_FILE. Recreating a service with only
+# the base file SILENTLY DROPS whatever the overlay added — which is exactly how the GPU
+# guard below "repaired" the transcoder by rebuilding it with no GPU, then detected the
+# missing GPU and did it again. Always heal with the same file set the deploy used.
+COMPOSE_ARGS="-f $COMPOSE_FILE"
+if [ -f "$COMPOSE_DIR/.env" ]; then
+    _cf=$(grep -E '^COMPOSE_FILE=' "$COMPOSE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-)
+    if [ -n "$_cf" ]; then
+        COMPOSE_ARGS=""
+        _oldifs=$IFS; IFS=:
+        for _f in $_cf; do
+            case "$_f" in
+                /*) _p="$_f" ;;
+                *)  _p="$COMPOSE_DIR/$_f" ;;
+            esac
+            [ -f "$_p" ] && COMPOSE_ARGS="$COMPOSE_ARGS -f $_p"
+        done
+        IFS=$_oldifs
+        [ -n "$COMPOSE_ARGS" ] || COMPOSE_ARGS="-f $COMPOSE_FILE"
+    fi
+fi
+
 # --- GPU fail-safe -----------------------------------------------------------------
 # The local LLM (Deep Hunt) must NEVER run on CPU — CPU inference of a 7B pegs every
 # core and starves the other containers. The ollama-gpu container intermittently loses
@@ -247,7 +270,8 @@ transcoder_gpu_guard() {
     [ $((now - last)) -ge 900 ] || return 0          # at most once every 15 min
     echo "$now" > "$GPU_TC_STATE" 2>/dev/null
     if timeout 60 docker exec vpntorrent-transcoder ffmpeg -hide_banner -loglevel error             -f lavfi -i testsrc=size=256x256:rate=1 -frames:v 2 -c:v h264_nvenc             -pix_fmt yuv420p -f null - >/dev/null 2>&1; then
-        return 0                                     # GPU fine
+        rm -f "$GPU_TC_STATE.fails" 2>/dev/null      # healthy -> reset the attempt count
+        return 0
     fi
     # Confirm the HOST GPU works before blaming the container — otherwise we would
     # recreate it forever on a box whose GPU is genuinely absent or busy.
@@ -255,9 +279,20 @@ transcoder_gpu_guard() {
         echo "transcoder: NVENC unusable and the host GPU is not available either — leaving it on CPU"
         return 0
     fi
-    echo "transcoder: GPU broken inside the container but healthy on the host -> recreating"
+    # Give up after a few attempts. If recreating does not restore the GPU, repeating it
+    # every 15 minutes forever just churns the container (and, before the COMPOSE_ARGS
+    # fix above, actively made things worse). CPU encoding still works.
+    fails=0
+    [ -f "$GPU_TC_STATE.fails" ] && fails=$(cat "$GPU_TC_STATE.fails" 2>/dev/null)
+    case "$fails" in ''|*[!0-9]*) fails=0 ;; esac
+    if [ "$fails" -ge 3 ]; then
+        echo "transcoder: GPU still unusable after $fails recreate attempts — staying on CPU"
+        return 0
+    fi
+    echo "$((fails + 1))" > "$GPU_TC_STATE.fails" 2>/dev/null
+    echo "transcoder: GPU broken inside the container but healthy on the host -> recreating (attempt $((fails + 1))/3)"
     if [ -f "$COMPOSE_FILE" ]; then
-        docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --no-deps --no-build             --force-recreate transcoder >/dev/null 2>&1             && echo "transcoder: recreated (driver libraries re-injected)"
+        docker compose -p "$PROJECT" $COMPOSE_ARGS up -d --no-deps --no-build             --force-recreate transcoder >/dev/null 2>&1             && echo "transcoder: recreated (driver libraries re-injected)"
     fi
 }
 
@@ -338,7 +373,7 @@ recreate() {
         return 1
     fi
     if [ -f "$COMPOSE_FILE" ]; then
-        docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --no-deps --no-build \
+        docker compose -p "$PROJECT" $COMPOSE_ARGS up -d --no-deps --no-build \
             --force-recreate "$svc" >/dev/null 2>&1 && return 0
     fi
     # last-ditch fallback if compose is unavailable: a plain restart (works only if the
@@ -356,7 +391,7 @@ if [ "$main_run" != "true" ]; then
     # back. If it is missing ENTIRELY, try to bring the whole stack up from compose.
     if [ "$main_run" = "missing" ] && [ -f "$COMPOSE_FILE" ]; then
         echo "heal: vpntorrent missing — docker compose up -d"
-        docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --no-build >/dev/null 2>&1 || true
+        docker compose -p "$PROJECT" $COMPOSE_ARGS up -d --no-build >/dev/null 2>&1 || true
     fi
     exit 0
 fi
