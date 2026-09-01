@@ -87,6 +87,15 @@ def start(real_path, caps=""):
     sid = _sid_for(real_path, mode)
     if not sid:
         return {}
+    # If a full conversion of this file already exists (from the old prepare path),
+    # hand that back instead: it plays with native byte-range seeking and needs no
+    # encoder at all. Work already done should never be done twice.
+    try:
+        pk = library.cache_key(real_path, "transcode")
+        if pk and os.path.exists(os.path.join(library.CACHE_DIR, pk + ".mp4")):
+            return {"prepared": pk, "duration": round(dur, 3), "mode": "prepared"}
+    except Exception:
+        pass
     try:
         os.makedirs(_dir_for(sid), exist_ok=True)
     except OSError:
@@ -127,7 +136,11 @@ def playlist(sid):
     for i in range(n):
         left = dur - i * SEG_SECONDS
         out.append("#EXTINF:%.3f," % (SEG_SECONDS if left > SEG_SECONDS else max(left, 0.001)))
-        out.append("seg%d.ts" % i)
+        # The URI must route back through the /hls/segment ENDPOINT. A bare "seg0.ts"
+        # resolves (per RFC 3986) against /hls/playlist to /hls/seg0.ts — a URL that
+        # does not exist — so every real player 404'd on its first segment while our
+        # endpoint-poking tests passed. The player follows the playlist, not our tests.
+        out.append("segment?sid=%s&n=%d" % (sid, i))
     out.append("#EXT-X-ENDLIST")
     return "\n".join(out) + "\n"
 

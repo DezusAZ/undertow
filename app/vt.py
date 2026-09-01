@@ -2318,6 +2318,8 @@ function libPlay(idx, fileIdx){
   holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> Starting…</div>';
   var q = 'id=' + encodeURIComponent(it.id) + '&f=' + f.i + '&caps=' + encodeURIComponent(libCaps());
   fetch('/hls/start?' + q).then(function(r){ return r.json(); }).then(function(h){
+    // A full conversion already exists on disk -> play it directly, no encoder needed.
+    if (h && h.prepared) { libMount(holder, tag, '/playfile?key=' + encodeURIComponent(h.prepared)); return; }
     if (h && h.sid && h.plan !== 'remux') { libMountHls(holder, tag, h); return; }
     // remux (or HLS unavailable) -> the original prepare-then-play path
     holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> Preparing for playback…</div>';
