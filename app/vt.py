@@ -1586,6 +1586,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 .lib-player audio{background:var(--canvas)}
 .lib-transnote{color:var(--amber);font-size:12px;margin:8px 0 0}
 .lib-prep{margin:14px 20px;padding:16px;border:1px solid var(--hair);border-radius:12px;background:rgba(11,25,19,.5);color:#adc4b7;font-size:14px;text-align:center;line-height:1.6}
+.lib-tierbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:#8b949e}.lib-tierbtn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#c9d1d9;border-radius:7px;padding:4px 10px;font:600 12px var(--font);cursor:pointer}.lib-tierbtn.on{background:#238636;border-color:#2ea043;color:#fff}.lib-tierbtn:hover{background:rgba(255,255,255,.12)}.lib-tierhint{flex-basis:100%;color:#6e7681;font-size:11px}
 .lib-prepbar{height:6px;border-radius:4px;background:rgba(255,255,255,.10);margin:9px 0 7px;overflow:hidden}.lib-prepbar>div{height:100%;background:#238636;transition:width .4s}
 .lib-prep small{color:var(--faint);font-size:12px}
 .lib-prep-err{color:#f8827b;border-color:rgba(248,81,73,.4)}
@@ -2316,7 +2317,8 @@ function libPlay(idx, fileIdx){
   //    a couple of seconds and only ever encodes the part you actually watch, instead
   //    of converting the whole film first (which took ~10 minutes for 1080p).
   holder.innerHTML = '<div class="lib-prep"><span class="lib-spin"></span> Starting…</div>';
-  var q = 'id=' + encodeURIComponent(it.id) + '&f=' + f.i + '&caps=' + encodeURIComponent(libCaps());
+  _hlsCtx = {id: it.id, fi: f.i, tag: tag, holder: holder};
+  var q = 'id=' + encodeURIComponent(it.id) + '&f=' + f.i + '&caps=' + encodeURIComponent(libCaps()) + '&tier=' + encodeURIComponent(_hlsTier);
   fetch('/hls/start?' + q).then(function(r){ return r.json(); }).then(function(h){
     // A full conversion already exists on disk -> play it directly, no encoder needed.
     if (h && h.prepared) { libMount(holder, tag, '/playfile?key=' + encodeURIComponent(h.prepared)); return; }
@@ -2332,6 +2334,30 @@ function libPlay(idx, fileIdx){
 }
 
 var _hlsObj = null, _hlsSid = null;
+var _hlsTier = (localStorage.getItem('vt_tier') || 'high');   // remembered per browser
+var _hlsCtx = null;                                            // last file, for re-select
+
+function libSetTier(t){
+  _hlsTier = t;
+  try { localStorage.setItem('vt_tier', t); } catch(e){}
+  // Restart the current stream at the new quality (a different encode, so a fresh play).
+  if (_hlsCtx) {
+    var c = _hlsCtx;
+    libStopMedia();
+    // re-drive libPlay by id/file
+    for (var i = 0; i < (LIB_ITEMS||[]).length; i++){
+      if (LIB_ITEMS[i] && LIB_ITEMS[i].id === c.id){ libPlay(i, c.fi); return; }
+    }
+  }
+}
+function libTierBar(current){
+  function b(t,label){ return '<button class="lib-tierbtn'+(t===current?' on':'')+
+    '" onclick="libSetTier(\''+t+'\')">'+label+'</button>'; }
+  return '<div class="lib-tierbar"><span>Quality:</span>' +
+    b('high','1080p') + b('medium','720p') + b('low','Data saver') +
+    '<span class="lib-tierhint">Drop this if it buffers on a slow connection.</span></div>';
+}
+
 
 function libStopHls(){
   if (_hlsObj) { try { _hlsObj.destroy(); } catch(e){} _hlsObj = null; }
@@ -2351,6 +2377,16 @@ function libLoadScript(src, cb){
   document.head.appendChild(sc);
 }
 
+function libToast(msg){
+  var t = document.getElementById('vtToast');
+  if (!t) { t = document.createElement('div'); t.id = 'vtToast';
+    t.style.cssText = 'position:fixed;left:50%;bottom:22px;transform:translateX(-50%);'+
+    'background:#161b22;border:1px solid #30363d;color:#e6edf3;padding:10px 16px;'+
+    'border-radius:10px;font:600 13px var(--font,sans-serif);z-index:9999;box-shadow:0 6px 24px rgba(0,0,0,.4)';
+    document.body.appendChild(t); }
+  t.textContent = msg; t.style.opacity = '1';
+  clearTimeout(t._h); t._h = setTimeout(function(){ t.style.opacity = '0'; }, 4500);
+}
 function libMountHls(holder, tag, h){
   var url = '/hls/playlist?sid=' + encodeURIComponent(h.sid);
   _hlsSid = h.sid;
@@ -2364,9 +2400,10 @@ function libMountHls(holder, tag, h){
   var note = document.createElement('div');
   note.className = 'lib-prep';
   note.style.marginTop = '8px';
-  note.innerHTML = 'Streaming live — converting only what you watch' +
-    (h.mode === 'hls-cpu' ? ' (CPU — no GPU available)' : '') +
-    '. <small>Seeking works; jumping far ahead pauses a moment while it catches up.</small>';
+  note.innerHTML = libTierBar(_hlsTier) +
+    '<div style="margin-top:6px">Streaming from your ZimaCube' +
+    (h.mode === 'hls-cpu' ? ' (CPU — no GPU)' : '') +
+    '. <small>Seeking works; a big jump pauses a second while it catches up.</small></div>';
   holder.appendChild(note);
 
   // Safari plays HLS natively; everyone else needs hls.js, which we serve ourselves.
@@ -2383,12 +2420,39 @@ function libMountHls(holder, tag, h){
     var hls = new Hls({
       manifestLoadingTimeOut: 60000,
       fragLoadingTimeOut: 180000,
-      fragLoadingMaxRetry: 4,
-      maxBufferLength: 30,          // ~5 segments ahead: enough buffer, no runaway encode
-      maxMaxBufferLength: 60,
+      fragLoadingMaxRetry: 6,
+      // Buffer deep. The encoder now runs several times faster than realtime (capped
+      // 1080p), so it can get well ahead; a large client buffer then absorbs remote-link
+      // jitter, which is what actually caused the cut-in-and-out.
+      maxBufferLength: 120,         // seconds to hold ahead of the playhead
+      maxMaxBufferLength: 240,
+      backBufferLength: 30,         // keep some behind for instant small rewinds
+      maxBufferHole: 1,
       enableWorker: true
     });
     _hlsObj = hls;
+    // AUTO-DOWNGRADE. If this connection can't sustain the current quality, playback
+    // stalls repeatedly. Rather than make the user diagnose it, count stalls and step
+    // down a tier automatically (1080p -> 720p -> Data saver) until it's smooth. This is
+    // what makes remote playback foolproof over a variable link. We never auto-upgrade,
+    // to avoid flapping; the user can raise it manually.
+    var _stalls = 0, _lastStall = 0, _downgraded = false;
+    var _order = ['high','medium','low'];
+    el.addEventListener('waiting', function(){
+      var now = Date.now();
+      if (now - _lastStall > 20000) _stalls = 0;   // forget old, isolated hiccups
+      _lastStall = now; _stalls++;
+      if (_stalls >= 3 && !_downgraded) {
+        var idx = _order.indexOf(_hlsTier);
+        if (idx >= 0 && idx < _order.length - 1) {
+          _downgraded = true;
+          var nx = _order[idx + 1];
+          libToast('Connection is slow — lowering quality to ' +
+                   (nx==='medium'?'720p':'Data saver') + ' for smoother playback');
+          libSetTier(nx);
+        }
+      }
+    });
     hls.loadSource(url);
     hls.attachMedia(el);
     hls.on(Hls.Events.ERROR, function(evt, data){
@@ -2787,9 +2851,11 @@ class H(BaseHTTPRequestHandler):
             if not p:
                 self._send(404, "not found", "text/plain"); return
             caps = (qs.get("caps") or [""])[0]
+            tier = (qs.get("tier") or ["high"])[0]
             try:
                 r = urllib.request.urlopen(
-                    TRANSCODER + "/hls/start?path=" + quote(p) + "&caps=" + quote(caps),
+                    TRANSCODER + "/hls/start?path=" + quote(p) + "&caps=" + quote(caps)
+                    + "&tier=" + quote(tier),
                     timeout=45).read()
             except Exception as e:
                 r = json.dumps({"error": str(e)[:120]}).encode()

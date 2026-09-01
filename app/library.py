@@ -698,6 +698,53 @@ def _have_nvenc():
     return _NVENC_OK
 
 
+# Streaming quality tiers. Remote playback goes over your home UPLOAD, so the bitrate is
+# the whole game: a 4K source re-encoded at source quality is ~44 Mbps and stalls on any
+# home link, while a capped 1080p stream at ~6 Mbps looks excellent and fits almost
+# anything. Each tier is (max_height, target_bitrate, maxrate, bufsize).
+STREAM_TIERS = {
+    # (max_height, target, maxrate, bufsize). bufsize == maxrate gives a HARD cap so
+    # NVENC/x264 can't spike above it — a spike above your upload is exactly the "cut
+    # out". Measured: "high" lands ~5 Mbps at 1080p and encodes >3x realtime on the A2000.
+    "high":   (1080, "5M",    "6M",    "6M"),
+    "medium": (720,  "2500k", "3M",    "3M"),
+    "low":    (480,  "1000k", "1500k", "1500k"),
+}
+DEFAULT_TIER = os.environ.get("STREAM_TIER", "high")
+
+
+def _probe_height(path):
+    try:
+        return int(_ffprobe1(path, "stream=height", "v:0") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def video_stream_opts(real_path, gpu, tier="high"):
+    """Full ffmpeg video-output options for a STREAMING encode: downscale anything above
+    the tier's height to it, and cap the bitrate so it fits a remote link. Returns a flat
+    arg list ready to splice into a command (filter + codec + rate control).
+
+    Used by both the HLS encoder and the fallback transcode so quality/bitrate are
+    consistent no matter which path a file takes. yuv420p is forced (NVENC can't do
+    10-bit; libx264 would emit undecodable High 10)."""
+    maxh, br, maxrate, bufsize = STREAM_TIERS.get(tier, STREAM_TIERS["high"])
+    args = []
+    srch = _probe_height(real_path)
+    if srch and srch > maxh:
+        # -2 keeps the width even and preserves aspect ratio. CPU scale: scale_cuda is
+        # not built into this ffmpeg, and CPU downscale of 4K still runs comfortably
+        # faster than realtime once the target is 1080p.
+        args += ["-vf", "scale=-2:%d" % maxh]
+    if gpu:
+        args += ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr"]
+    else:
+        args += ["-c:v", "libx264", "-preset", "veryfast"]
+    args += ["-b:v", br, "-maxrate", maxrate, "-bufsize", bufsize,
+             "-profile:v", "high", "-pix_fmt", "yuv420p"]
+    return args
+
+
 def _venc_args(gpu):
     """H.264 encoder args. yuv420p is mandatory: NVENC refuses 10-bit outright, and
     libx264 would happily emit High 10, which no browser can decode."""

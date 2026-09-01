@@ -76,10 +76,13 @@ class H(BaseHTTPRequestHandler):
         elif u.path == "/hls/start":
             path = (qs.get("path") or [""])[0]
             caps = re.sub(r"[^a-z0-9,]", "", (qs.get("caps") or [""])[0].lower())[:120]
+            tier = (qs.get("tier") or ["high"])[0]
+            if tier not in ("high", "medium", "low"):
+                tier = "high"
             real = _safe(path) if path else None
             if not real:
                 self._json({"error": "not found"}, 404); return
-            r = hls.start(real, caps)
+            r = hls.start(real, caps, tier)
             self._json(r or {"error": "unsupported"}, 200 if r else 415)
         elif u.path == "/hls/playlist":
             pl = hls.playlist((qs.get("sid") or [""])[0])

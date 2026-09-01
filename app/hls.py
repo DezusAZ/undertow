@@ -51,12 +51,12 @@ _lock = threading.Lock()
 _sessions = {}          # sid -> dict(path, mode, dur, proc, start_seg, last_used, dir)
 
 
-def _sid_for(real_path, mode):
+def _sid_for(real_path, mode, tier="high"):
     try:
         st = os.stat(real_path)
     except OSError:
         return None
-    raw = "%s|%d|%d|%s|hls" % (real_path, st.st_mtime_ns, st.st_size, mode)
+    raw = "%s|%d|%d|%s|%s|hls" % (real_path, st.st_mtime_ns, st.st_size, mode, tier)
     return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:20]
 
 
@@ -69,7 +69,7 @@ def seg_path(sid, n):
 
 
 # ----------------------------------------------------------------- session lifecycle
-def start(real_path, caps=""):
+def start(real_path, caps="", tier="high"):
     """Prepare an HLS session. Encodes nothing yet — returns the shape of the stream.
 
     Returns {} if the file is unusable. `mode` is informational for the UI.
@@ -84,18 +84,21 @@ def start(real_path, caps=""):
     # A file the browser can already decode is better served by the existing quick remux
     # (a container swap, no re-encode); HLS exists for the expensive case.
     mode = "hls-gpu" if library._have_nvenc() else "hls-cpu"
-    sid = _sid_for(real_path, mode)
+    sid = _sid_for(real_path, mode, tier)
     if not sid:
         return {}
-    # If a full conversion of this file already exists (from the old prepare path),
-    # hand that back instead: it plays with native byte-range seeking and needs no
-    # encoder at all. Work already done should never be done twice.
-    try:
-        pk = library.cache_key(real_path, "transcode")
-        if pk and os.path.exists(os.path.join(library.CACHE_DIR, pk + ".mp4")):
-            return {"prepared": pk, "duration": round(dur, 3), "mode": "prepared"}
-    except Exception:
-        pass
+    # If a full conversion already exists AND the caller wants default quality, hand it
+    # back: native seeking, no encoder. But when a lower tier is requested (the user or
+    # auto-downgrade is fighting a slow link), do NOT use it — its bitrate is whatever it
+    # was baked at. Re-stream via HLS at the capped tier instead, which is the whole
+    # point of asking for lower quality.
+    if tier == "high":
+        try:
+            pk = library.cache_key(real_path, "transcode")
+            if pk and os.path.exists(os.path.join(library.CACHE_DIR, pk + ".mp4")):
+                return {"prepared": pk, "duration": round(dur, 3), "mode": "prepared"}
+        except Exception:
+            pass
     try:
         os.makedirs(_dir_for(sid), exist_ok=True)
     except OSError:
@@ -105,7 +108,7 @@ def start(real_path, caps=""):
         s = _sessions.get(sid)
         if s is None:
             s = {"path": real_path, "mode": mode, "dur": dur, "nsegs": nsegs,
-                 "proc": None, "start_seg": -1, "next_seg": -1,
+                 "proc": None, "start_seg": -1, "next_seg": -1, "tier": tier,
                  "last_used": time.time(), "dir": _dir_for(sid)}
             _sessions[sid] = s
         else:
@@ -174,9 +177,12 @@ def _spawn(sid, s, from_seg):
     if gpu:
         cmd += ["-hwaccel", "cuda"]
     cmd += ["-ss", "%.3f" % start_t, "-i", s["path"]]
-    cmd += library._venc_args(gpu)
+    # Downscale to 1080p (or the session's tier) and cap the bitrate, so the stream fits
+    # a remote link instead of shipping 44 Mbps of 4K. This also speeds the encoder up
+    # (1080p is far less work than 4K), which lets the client buffer ahead = no stalls.
+    cmd += library.video_stream_opts(s["path"], gpu, s.get("tier", "high"))
     cmd += ["-force_key_frames", kf,
-            "-c:a", "aac", "-ac", "2", "-b:a", "160k",
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k",
             "-dn", "-sn",
             # put the timeline back where it belongs after the input seek, so a restart
             # mid-film does not look like a discontinuity to the player
