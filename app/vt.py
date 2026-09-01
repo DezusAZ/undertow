@@ -1420,7 +1420,7 @@ def _engine_status():
 OPTS = "".join(f'<option value="{sub}">{label}</option>' for label, sub in CATEGORIES)
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1"><title>Undertow — login</title><style>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Undertow — login</title><link rel=icon href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a2b1c'/%3E%3Cpath d='M32 12l16 6v14c0 11-7 18-16 22-9-4-16-11-16-22V18l16-6z' fill='none' stroke='%2368f0a6' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M32 23v16M24 32l8 8 8-8' stroke='%2368f0a6' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"><style>
 :root{--green:#34dd7d;--green-b:#68f0a6;--font:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",system-ui,sans-serif}
 *{box-sizing:border-box}
 body{font:15px/1.5 var(--font);margin:0;color:#e8f2ec;-webkit-font-smoothing:antialiased;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px;background:radial-gradient(900px 500px at 50% -140px,#0d2a1c,#06110c 62%) fixed,#06110c}
@@ -1444,7 +1444,7 @@ __ERR__
 
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Undertow</title><style>
+<title>Undertow</title><link rel=icon href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a2b1c'/%3E%3Cpath d='M32 12l16 6v14c0 11-7 18-16 22-9-4-16-11-16-22V18l16-6z' fill='none' stroke='%2368f0a6' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M32 23v16M24 32l8 8 8-8' stroke='%2368f0a6' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"><style>
 :root{
 --canvas:#06110c;--glow:#0d2a1c;--surface:#0b1913;--surface-2:#0f2318;--surface-3:#122a1d;
 --hair:rgba(120,220,160,.12);--hair2:rgba(120,220,160,.22);
@@ -2406,6 +2406,12 @@ function libMount(holder, tag, src){
   var el = document.createElement(tag);
   el.controls = true; el.autoplay = true; el.setAttribute('playsinline', '');
   el.src = src;
+  // If the browser can't decode what we handed it, don't leave a dead black box — say
+  // so and point at the player that always works.
+  el.onerror = function(){
+    holder.innerHTML = '<div class="lib-prep lib-prep-err">Your browser could not play this file.' +
+      '<br><small>Use <b>📺 VLC / app</b> below — it plays the original at full quality on your device.</small></div>';
+  };
   holder.innerHTML = ''; holder.appendChild(el);
   libMediaEl = el;
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
