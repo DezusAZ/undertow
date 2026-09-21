@@ -36,6 +36,20 @@ const WAIT_RESULTS_MS = +(process.env.WAIT_RESULTS_MS || 420000);
     log('brain banner:', banner.slice(0, 120).replace(/\s+/g, ' '));
     check(/active|basic mode|off|does not answer|GPU|paused|failed/i.test(banner), 'brain banner renders a state');
 
+    // in-app guide: open for a newcomer with no hunts, examples fill the form, toggle hides it
+    const noHunts = (await page.locator('.hunt').count()) === 0;
+    const guideOpen = await page.evaluate(() => { const g = document.getElementById('hunthelp'); return !!g && !g.hidden; });
+    check(!noHunts || guideOpen, 'guide panel is open for a first-time user (no hunts yet)');
+    if (!guideOpen) await page.click('#hhelpbtn');
+    await page.waitForSelector('.hexample', { timeout: 5000 });
+    await page.locator('.hexample').first().click();
+    const filled = await page.evaluate(() => ({ g: document.getElementById('hgoal').value, d: document.getElementById('hdesc').value, c: document.getElementById('hcat').value }));
+    check(filled.g.length > 5 && filled.d.length > 10 && filled.c !== 'all', 'clicking an example fills target, category and description');
+    await page.click('#hhelpbtn');
+    check(await page.evaluate(() => document.getElementById('hunthelp').hidden), 'guide toggle hides the panel');
+    const hints = await page.evaluate(() => ['#hgoal', '#hcat', '#hpace', '#hdesc', '#hgo', '.tabbtn[data-tab=hunt]'].filter(s => { const e = document.querySelector(s); return e && e.title && e.title.length > 20; }).length);
+    check(hints === 6, 'hover hints present on the hunt form and tab (' + hints + '/6)');
+
     // start a hunt
     await page.fill('#hgoal', GOAL);
     await page.selectOption('#hcat', 'movies').catch(() => {});

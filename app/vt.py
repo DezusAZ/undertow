@@ -1557,6 +1557,15 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 .huntres{margin-top:12px;border-top:1px solid var(--hair);padding-top:6px}
 .huntres .t{background:rgba(11,25,19,.4);padding:11px 13px;margin:8px 0}
 .hunterr{font-size:12.5px;color:#f85149;margin:0 0 8px}.hunterr:empty{display:none}
+.srcintro #hhelpbtn{margin-left:8px;vertical-align:baseline}
+.hunthelp{background:rgba(6,17,12,.45);border:1px solid rgba(52,221,125,.28);border-radius:var(--r);padding:12px 15px 13px;margin:0 0 14px;font-size:13px;line-height:1.5;color:#adc4b7}
+.hunthelp h4{margin:0 0 6px;font-size:13px;color:var(--text)}
+.hunthelp .hh{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px 22px}
+.hunthelp ul{margin:0;padding-left:18px}.hunthelp li{margin:3px 0}.hunthelp b{color:var(--text)}
+.hexamples{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:6px}
+.hexample{cursor:pointer;background:rgba(11,25,19,.5);border:1px solid var(--hair);border-radius:8px;padding:8px 10px;transition:.15s var(--ease)}
+.hexample:hover{border-color:rgba(52,221,125,.45)}.hexample b{display:block;color:var(--text);font-size:12.5px}
+.hexample span{font-size:11.5px;color:var(--muted)}.hexample .cat{color:#3fb950;font-family:var(--mono, ui-monospace);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;margin-right:6px}
 .huntprof{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}.huntprof b{color:var(--text)}
 .huntprof .pk{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-right:4px}
 .huntnow{font-size:12.5px;margin-top:8px;color:var(--text);line-height:1.45}.huntnow .why{color:var(--muted);font-style:italic}
@@ -1657,19 +1666,19 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 <div class=sub>download-only · never seeds · saving to <code>__SAVE__</code></div>
 <div id=vpn class=vpn>checking VPN…</div>
 <div class=tabs>
-<button class="tabbtn active" data-tab=search onclick="navTo('search')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>Search</button>
-<button class="tabbtn" data-tab=sources onclick="navTo('sources')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18"/></svg>Sources</button>
-<button class="tabbtn" data-tab=hunt onclick="navTo('hunt')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 12 18.5 5.5"/></svg>Deep Hunt</button>
-<button class="tabbtn" data-tab=downloads onclick="navTo('downloads')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 19h16"/></svg>Downloads <span id=dlcount></span></button>
-<button class="tabbtn" data-tab=library onclick="navTo('library')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3Z"/></svg>Library</button>
-<button class="tabbtn" data-tab=engines onclick="navTo('engines')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6"/></svg>Engines</button>
+<button class="tabbtn active" data-tab=search title="Search — one query across 100+ indexers, Usenet, our DHT crawler and open repositories" onclick="navTo('search')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>Search</button>
+<button class="tabbtn" data-tab=sources title="Sources — find open directories (whole folders of files) on a topic, then crawl outward from them" onclick="navTo('sources')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18"/></svg>Sources</button>
+<button class="tabbtn" data-tab=hunt title="Deep Hunt — a background AI agent that keeps looking for one hard-to-find thing until it finds it" onclick="navTo('hunt')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 12 18.5 5.5"/></svg>Deep Hunt</button>
+<button class="tabbtn" data-tab=downloads title="Downloads — torrents, Usenet and direct files in progress; everything goes through the VPN and the scanner" onclick="navTo('downloads')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 19h16"/></svg>Downloads <span id=dlcount></span></button>
+<button class="tabbtn" data-tab=library title="Library — what has finished: play here or hand it to VLC / any player on your device" onclick="navTo('library')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3Z"/></svg>Library</button>
+<button class="tabbtn" data-tab=engines title="Engines — the services under the hood, the local AI, notifications and health" onclick="navTo('engines')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6"/></svg>Engines</button>
 </div>
 <div id=tab-search class=tab-panel>
 <form class=search onsubmit="search(event)">
-<input type=text id=q placeholder="search for movies, shows, music, anything…" autocomplete=off>
-<select id=cat>__OPTS__</select>
+<input type=text id=q placeholder="search for movies, shows, music, anything…" autocomplete=off title="Keywords work best: title + year, artist + album, or a release-style name. Results merge 100+ indexers, Usenet, our DHT crawler and open repositories, ranked by relevance and how downloadable they are. For something a search can't find, use 🔦 Deep Hunt.">
+<select id=cat title="Narrows the sources and picks the download folder (Documents = papers, books, scans; Software = apps, ISOs, code).">__OPTS__</select>
 <button type=button id=aibtn class=aibtn hidden onclick="smartSearch()" title="Ask in plain English — the local AI picks the keywords + category">✨ AI</button>
-<button id=go>Search</button></form>
+<button id=go title="Search every source at once (takes ~10-15 s). No VPN = no downloads, but searching still works.">Search</button></form>
 <div id=ainote class=ainote hidden></div>
 <details><summary>…or paste a magnet link directly</summary>
 <form class=add onsubmit="add(event)">
@@ -1681,21 +1690,44 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 <div id=tab-sources class=tab-panel hidden>
 <div class=srcintro>🛰 <b>Sources mode</b> — instead of files, this finds the <b>open directories & file servers</b> where files live, so you can browse them yourself. Search a topic and (optionally) a file type; every result below is a confirmed, browsable open directory.</div>
 <form class=search onsubmit="findSources(event)">
-<input type=text id=sq placeholder="topic — e.g. jazz, apollo, linux, synthwave…" autocomplete=off>
-<input type=text id=sext placeholder="type (optional): pdf, flac, mp4…" autocomplete=off style="max-width:150px">
-<button id=sgo>Find servers</button></form>
+<input type=text id=sq placeholder="topic — e.g. jazz, apollo, linux, synthwave…" autocomplete=off title="A topic, not a title: this mode finds open directories (whole folders of files) and then crawls outward from them. Two to four distinctive words work best.">
+<input type=text id=sext placeholder="type (optional): pdf, flac, mp4…" autocomplete=off style="max-width:150px" title="Only keep folders that actually contain this file type">
+<button id=sgo title="Dork the search engines for open directories, confirm each one is real, then crawl their neighbours (~20 s)">Find servers</button></form>
 <div id=srcresults></div>
 </div>
 <div id=tab-hunt class=tab-panel hidden>
-<div class=srcintro>🔦 <b>Deep Hunt</b> — for when a normal search comes up empty. Give it a target and it grinds in the <b>background for as long as it takes</b> — days, weeks — inventing new angles (rephrasings, translations, open-directory dorks, source pivots) with the local AI, going deeper into anything promising, and piling up <b>every</b> result until you stop it. Keeps running across reboots. Optional: works without AI too, just less clever.</div>
+<div class=srcintro>🔦 <b>Deep Hunt</b> is a persistent search agent, not a search box. Tell it <b>what</b> you want and <b>what counts as found</b>; it works out what the thing actually is, aims searches at the sources most likely to hold it, judges every result with a reason, learns from what comes back, and keeps going — across reboots — until you stop it. Ordinary things turn up in minutes; genuinely obscure ones can take hours or days, which is the point. <button class=sec id=hhelpbtn onclick="toggleHuntHelp()" title="how to write a hunt that finds things, with examples you can click">📖 How to get good results</button></div>
+<div id=hunthelp class=hunthelp hidden>
+<div class=hh>
+<div class=hhcol><h4>Write it like this</h4>
+<ul>
+<li><b>Target</b> — the name as precisely as you know it, plus the detail that tells it apart: year, artist, edition, version, catalogue number.</li>
+<li><b>What counts as found</b> — the box that makes the judge smart. Say what is acceptable, what <i>also</i> counts, what <i>must</i> be true, what you would <i>prefer</i>.</li>
+<li><b>Hard vs soft</b> — “only”, “must”, “not the remake”, “at least” are requirements. “preferred”, “ideally”, “if it exists”, “or highest quality” are wishes: a copy without them still counts, just with lower confidence.</li>
+<li><b>Name the decoys</b> — “not the making-of”, “no samplers or single tracks”, “not colorized”: the judge rejects those on sight.</li>
+<li><b>One thing per hunt</b> — run several hunts side by side instead; they take turns on the AI.</li>
+</ul></div>
+<div class=hhcol><h4>What you’ll see on the card</h4>
+<ul>
+<li><b>Target line</b> — the AI’s profile: what it thinks the thing is, its aliases, creators, what it will reject. If it says it isn’t confident, sharpen your description.</li>
+<li><b>Doing now</b> — the last strategy: which source, the query, why, and the yield.</li>
+<li><b>▸ Show activity</b> — the full log: profile, plans, every cycle with its reason, reflections. When a hunt goes quiet, the answer is here.</li>
+<li><b>Results</b> — the badge is the AI’s verdict and confidence; the line under the title is its reason. ⬇ downloads files; Open ↗ is a web page.</li>
+<li><b>⚡ Rethink</b> — forces a fresh plan when a hunt has gone idle. <b>👁 Keep watching</b> re-sweeps on a schedule for things that don’t exist yet.</li>
+<li><b>Brain banner</b> — “active” with call counts means the AI is answering; “basic mode” means it isn’t, and Engines → Local AI says why.</li>
+</ul></div></div>
+<h4 style="margin:10px 0 4px">Examples — click one to fill the form</h4>
+<div id=hexamples class=hexamples></div>
+<div style="font-size:12px;color:var(--faint);margin-top:8px">It can only find what some public source exposes, and verdicts come from a local model — good, not infallible; a wrong one is visible in its reason. The first hunt after idle waits a minute or two for the AI to wake up. Nothing you type leaves your network.</div>
+</div>
 <form class=huntform onsubmit="createHunt(event)">
-<input type=text id=hgoal placeholder="what to hunt for — e.g. obscure 1970s japanese ambient records" autocomplete=off>
-<select id=hcat>__OPTS__</select>
-<select id=hpace title="how hard to grind"><option value=gentle>Gentle</option><option value=normal selected>Normal</option><option value=aggressive>Aggressive</option></select>
-<label class=huntwatch title="Keep watching: once it runs out of ideas, re-sweep on a schedule so files uploaded LATER are still caught. Pairs with notifications."><input type=checkbox id=hwatch onchange="document.getElementById('hsweep').disabled=!this.checked"> 👁 Keep watching</label>
-<select id=hsweep disabled title="how often to re-sweep for new uploads"><option value=6h>every 6h</option><option value=daily selected>daily</option><option value=weekly>weekly</option></select>
-<input type=text id=hdesc class=hdesc placeholder="what counts as FOUND — e.g. the 2019 compilation, or any complete original album by these artists; FLAC preferred (the AI treats this as the rule)" autocomplete=off>
-<button id=hgo>🔦 Start hunt</button></form>
+<input type=text id=hgoal placeholder="what to hunt for — name + the detail that tells it apart (year, artist, edition)" autocomplete=off title="The thing itself, as precisely as you know it. One target per hunt.">
+<select id=hcat title="Narrows the sources and picks the download folder. Documents = papers, books, scans; Other = datasets and odd files.">__OPTS__</select>
+<select id=hpace title="How hard to grind: gentle is polite to the indexers, aggressive is for when you want it now. Changeable on the card."><option value=gentle>Gentle</option><option value=normal selected>Normal</option><option value=aggressive>Aggressive</option></select>
+<label class=huntwatch title="Keep watching: once it runs out of ideas, re-sweep on a schedule so files uploaded LATER are still caught — for things that may not exist yet. Pairs with notifications."><input type=checkbox id=hwatch onchange="document.getElementById('hsweep').disabled=!this.checked"> 👁 Keep watching</label>
+<select id=hsweep disabled title="How often to re-sweep for new uploads"><option value=6h>every 6h</option><option value=daily selected>daily</option><option value=weekly>weekly</option></select>
+<input type=text id=hdesc class=hdesc placeholder="what counts as FOUND — e.g. the 2019 compilation, or any complete original album by these artists; FLAC preferred" autocomplete=off title="The rule the AI judges by. Say what is acceptable, what also counts, what must be true (only / must / not the …), and what you'd prefer (preferred / ideally / if it exists).">
+<button id=hgo title="Starts a background hunt that keeps running — across reboots — until you stop it">🔦 Start hunt</button></form>
 <div id=hunterr class=hunterr></div>
 <div id=huntbrain class=huntbrain></div>
 <div id=hunts></div>
@@ -1708,7 +1740,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 </div>
 <div id=tab-downloads class=tab-panel hidden>
 <div id=list></div>
-<div id=dlempty class=empty>No downloads yet — find something in Search.</div>
+<div id=dlempty class=empty>No downloads yet — find something in Search, or start a 🔦 Deep Hunt for something rare. Everything here is fetched through the VPN, scanned, and never seeded.</div>
 </div>
 <div id="tab-library" class="tab-panel" hidden>
   <div class="lib-toolbar">
@@ -1899,9 +1931,9 @@ return '<div class=t><div class=tn>'+esc(u.name)+'</div>'+
 '</div><div class=acts>'+acts+'</div></div>';}).join('');
 L.innerHTML=dh+uh+d.torrents.map(t=>{let done=t.finished;let col=done?'#3fb950':(t.state[0]=='P'?'#8b949e':'#238636');
 let b='';
-if(done){b=`<button class=sec onclick="rc('${t.ih}')">↻ Recheck</button>`;}
-else if(t.upaused){b=`<button class=sec onclick="rs('${t.ih}')" ${VPN?'':'disabled'}>▶ Resume</button><button class=sec onclick="rc('${t.ih}')">↻ Recheck</button>`;}
-else{b=`<button class=sec onclick="ps('${t.ih}')">⏸ Pause</button><button class=sec onclick="rc('${t.ih}')">↻ Recheck</button>`;}
+if(done){b=`<button class=sec title="re-verify the finished file against the torrent's checksums" onclick="rc('${t.ih}')">↻ Recheck</button>`;}
+else if(t.upaused){b=`<button class=sec title="continue downloading (needs the VPN)" onclick="rs('${t.ih}')" ${VPN?'':'disabled'}>▶ Resume</button><button class=sec title="re-verify what is on disk against the torrent's checksums" onclick="rc('${t.ih}')">↻ Recheck</button>`;}
+else{b=`<button class=sec title="pause this download; it never seeds while paused or when finished" onclick="ps('${t.ih}')">⏸ Pause</button><button class=sec title="re-verify what is on disk against the torrent's checksums" onclick="rc('${t.ih}')">↻ Recheck</button>`;}
 b+=`<button class=sec onclick="del('${t.ih}')">✕ Remove</button>`;
 return `<div class=t><div class=tn>${esc(t.name)}</div>
 <div class=bar><div class=fill style="width:${t.progress}%;background:${col}"></div></div>
@@ -1935,6 +1967,30 @@ async function nzbDel(id,withFiles){
 var HUNT_EXPANDED={};var HUNT_RES={};var huntTimer=null;
 function huntTabActive(){var p=document.getElementById('tab-hunt');return p&&!p.hidden;}
 function huntErr(msg){var el=document.getElementById('hunterr');if(el)el.textContent=msg||'';}
+// In-app guide: worked examples that fill the form on click, and a panel that stays open
+// until this browser has dismissed it once (newcomers see it; regulars don't).
+var HUNT_EXAMPLES=[
+ {g:'Kankyō Ongaku Japanese ambient 1980s compilation',c:'music',d:'the 2019 Light in the Attic compilation, or any complete original 1980s album by Hiroshi Yoshimura, Satoshi Ashikawa or Takashi Kokubo; FLAC preferred'},
+ {g:'Grateful Dead 1977-05-08 Cornell Barton Hall',c:'music',d:'the complete show from a soundboard source; any lossless copy counts, no single tracks'},
+ {g:'Night of the Living Dead 1968',c:'movies',d:'the original 1968 film only — not the 1990 remake, not colorized; best restoration available, 4K if it exists'},
+ {g:'The Prisoner 1967 series',c:'tv',d:'all 17 episodes, any complete set; the Blu-ray remaster preferred'},
+ {g:'Ubuntu 4.10 Warty Warthog',c:'software',d:'only the original i386 install CD ISO from 2004'},
+ {g:'Apollo 11 flight plan July 1969',c:'documents',d:'the official NASA flight plan as a complete scanned PDF'},
+ {g:'Voynich manuscript scans',c:'documents',d:'full-resolution page scans (TIFF/JPEG) or a complete PDF facsimile of every folio'},
+ {g:'MNIST original idx files',c:'other',d:'the original four idx files from Yann LeCun\'s site or an exact mirror'}];
+function renderHuntExamples(){var el=document.getElementById('hexamples');if(!el||el.childElementCount)return;
+el.innerHTML=HUNT_EXAMPLES.map(function(x,i){return '<div class=hexample onclick="huntExample('+i+')" title="click to fill the form with this example"><b>'+esc(x.g)+'</b><span><span class=cat>'+esc(x.c)+'</span>'+esc(x.d)+'</span></div>';}).join('');}
+function huntExample(i){var x=HUNT_EXAMPLES[i];if(!x)return;document.getElementById('hgoal').value=x.g;document.getElementById('hdesc').value=x.d;
+var c=document.getElementById('hcat');if(c){for(var k=0;k<c.options.length;k++){if(c.options[k].value===x.c){c.selectedIndex=k;break;}}}
+document.getElementById('hgoal').scrollIntoView({block:'center',behavior:'smooth'});document.getElementById('hgoal').focus();}
+function huntHelpDismissed(){try{return localStorage.getItem('vt_hunthelp')==='closed';}catch(e){return false;}}
+function toggleHuntHelp(force){var el=document.getElementById('hunthelp');if(!el)return;var open=(force!==undefined)?force:el.hidden;el.hidden=!open;renderHuntExamples();
+var b=document.getElementById('hhelpbtn');if(b)b.textContent=open?'📖 Hide the guide':'📖 How to get good results';
+try{localStorage.setItem('vt_hunthelp',open?'open':'closed');}catch(e){}}
+function huntHelpFirstRun(hasHunts){var el=document.getElementById('hunthelp');if(!el||el.dataset.init)return;el.dataset.init='1';
+var pref=null;try{pref=localStorage.getItem('vt_hunthelp');}catch(e){}
+var open=pref?(pref==='open'):!hasHunts;   // newcomer with no hunts: open; otherwise remember the choice
+el.hidden=!open;renderHuntExamples();var b=document.getElementById('hhelpbtn');if(b)b.textContent=open?'📖 Hide the guide':'📖 How to get good results';}
 // A fetch that treats "logged out" honestly: the server answers 401 for XHR paths, but if a
 // 302 ever sneaks through (older builds), r.redirected/r.url tells us the same thing.
 async function hfetch(url,opts){var r=await fetch(url,opts);if(r.status==401||(r.redirected&&/\/login/.test(r.url))){location.href='/login';throw new Error('login');}return r;}
@@ -1951,6 +2007,7 @@ btn.disabled=false;btn.textContent='🔦 Start hunt';loadHunts();}
 var _huntStruct='';var _huntsBusy=false;
 async function loadHunts(){if(_huntsBusy||document.hidden)return;_huntsBusy=true;var r;try{r=await hfetch('/hunt/list');}catch(e){_huntsBusy=false;return}
 var L;try{L=await r.json();}catch(e){_huntsBusy=false;return}_huntsBusy=false;var el=document.getElementById('hunts');if(!el)return;
+huntHelpFirstRun(!!L.length);
 huntNotifyCheck(L);loadBrainStatus();
 if(!L.length){el.innerHTML='<div class=empty>No hunts running. Start one above — it keeps grinding in the background (even across reboots) until you stop it.</div>';_huntStruct='';return}
 // The card STRUCTURE = which hunts exist + whether each is stopped (that changes the buttons). We
@@ -2014,10 +2071,10 @@ return '<div class=ev><span class=t>'+hh+'</span><span class=q>'+esc(e.kind||'')
 function _htog(h){return (HUNT_EXPANDED[h.id]?'▾ Hide':'▸ View')+' results ('+(h.result_count||0)+')';}
 function _hlogtog(h){return (HUNT_LOG[h.id]?'▾ Hide':'▸ Show')+' activity';}
 function renderHunt(h){
-var btns=(h.status==='stopped')?'<button class=sec onclick="huntAct(\''+h.id+'\',\'resume\')">▶ Resume</button>':'<button class=sec onclick="huntAct(\''+h.id+'\',\'stop\')">⏸ Stop</button>';
-btns+='<button class=sec title="drop the idle pause and make the brain plan new angles right now" onclick="huntUpdate(\''+h.id+'\',{kick:true},this)">⚡ Rethink</button>';
-btns+='<select class=sec title="how hard to grind" onchange="huntUpdate(\''+h.id+'\',{pace:this.value},this)">'+['gentle','normal','aggressive'].map(function(p){return '<option value='+p+(h.pace===p?' selected':'')+'>'+p+'</option>'}).join('')+'</select>';
-btns+='<button class=sec onclick="huntAct(\''+h.id+'\',\'delete\')">✕ Delete</button>';
+var btns=(h.status==='stopped')?'<button class=sec title="start grinding again from where it left off" onclick="huntAct(\''+h.id+'\',\'resume\')">▶ Resume</button>':'<button class=sec title="pause the hunt; results and memory are kept, Resume picks up where it stopped" onclick="huntAct(\''+h.id+'\',\'stop\')">⏸ Stop</button>';
+btns+='<button class=sec title="Drop the idle pause and make the AI plan new angles right now — use it when a hunt has gone quiet" onclick="huntUpdate(\''+h.id+'\',{kick:true},this)">⚡ Rethink</button>';
+btns+='<select class=sec title="How hard to grind: gentle is polite to the indexers, aggressive is for when you want it now" onchange="huntUpdate(\''+h.id+'\',{pace:this.value},this)">'+['gentle','normal','aggressive'].map(function(p){return '<option value='+p+(h.pace===p?' selected':'')+'>'+p+'</option>'}).join('')+'</select>';
+btns+='<button class=sec title="remove this hunt and everything it accumulated (downloads already added are kept)" onclick="huntAct(\''+h.id+'\',\'delete\')">✕ Delete</button>';
 var exp=HUNT_EXPANDED[h.id],lg=HUNT_LOG[h.id];
 return '<div class=hunt><div class=hunttop><div class=huntgoal><span class=huntdot id="hdot-'+h.id+'" style="background:'+_hcol(h.status)+'"></span>'+esc(h.goal)+'</div>'+
 '<span class=huntstatus id="hstatus-'+h.id+'">'+_hstat(h)+'</span></div>'+
@@ -2027,7 +2084,7 @@ return '<div class=hunt><div class=hunttop><div class=huntgoal><span class=huntd
 '<div class=huntjournal id="hjour-'+h.id+'" '+(h.journal?'':'hidden')+'>'+_hjournal(h)+'</div>'+
 '<div class=huntyield id="hyield-'+h.id+'">'+_hyield(h)+'</div>'+
 '<div class=huntprof id="hidle-'+h.id+'">'+_hwhyidle(h)+'</div>'+
-'<div class=acts><button class=sec id="htog-'+h.id+'" onclick="toggleHunt(\''+h.id+'\')">'+_htog(h)+'</button><button class=sec id="hltog-'+h.id+'" onclick="toggleHuntLog(\''+h.id+'\')">'+_hlogtog(h)+'</button>'+btns+'</div>'+
+'<div class=acts><button class=sec id="htog-'+h.id+'" title="everything the AI judged to be the target, best first — each with its verdict and reason" onclick="toggleHunt(\''+h.id+'\')">'+_htog(h)+'</button><button class=sec id="hltog-'+h.id+'" title="what it has been doing, step by step: the profile, plans, every strategy with its reason and yield, reflections" onclick="toggleHuntLog(\''+h.id+'\')">'+_hlogtog(h)+'</button>'+btns+'</div>'+
 '<div class=huntlog id="hlog-'+h.id+'" '+(lg?'':'hidden')+'>'+_hlog(h)+'</div>'+
 '<div class=huntres id="hres-'+h.id+'" '+(exp?'':'hidden')+'></div></div>';}
 function _setHtml(id,html){var el=document.getElementById(id);if(el&&el.innerHTML!==html)el.innerHTML=html;return el;}
@@ -2057,11 +2114,11 @@ var sig=res.length+'|'+res.map(function(t){return (t.title||'').length}).join(',
 if(el.dataset.sig===sig)return;
 var _y=window.scrollY;el.dataset.sig=sig;
 el.innerHTML=res.map(function(t,i){var act;var href=_safeHref(t.url);
-if(t.magnet||t.torrent_url||t.nzb_id)act='<button class=sec onclick="dlHunt(\''+hid+'\','+i+',this)">⬇ Download</button>';
-else if(href&&isFileUrl(t))act='<button class=sec onclick="dlUrl(HUNT_RES[\''+hid+'\']['+i+'],this)">⬇ Download</button><a class=sec style="text-decoration:none" href="'+esc(href)+'" target=_blank rel=noopener>↗</a>';
-else if(href)act='<a class=sec style="text-decoration:none" href="'+esc(href)+'" target=_blank rel=noopener>Open ↗</a>';else act='';
+if(t.magnet||t.torrent_url||t.nzb_id)act='<button class=sec title="add to Downloads — fetched through the VPN and scanned before it reaches the Library" onclick="dlHunt(\''+hid+'\','+i+',this)">⬇ Download</button>';
+else if(href&&isFileUrl(t))act='<button class=sec title="a plain file on a public server: downloaded through the VPN into the category folder, scanned like everything else" onclick="dlUrl(HUNT_RES[\''+hid+'\']['+i+'],this)">⬇ Download</button><a class=sec style="text-decoration:none" href="'+esc(href)+'" target=_blank rel=noopener title="open the source page in a new tab">↗</a>';
+else if(href)act='<a class=sec style="text-decoration:none" href="'+esc(href)+'" target=_blank rel=noopener title="a web page, not a file — it may host the download; opens in a new tab">Open ↗</a>';else act='';
 var seed=t.nzb_id?'⚡ Usenet':((t.magnet||t.torrent_url)?('▲ '+(t.seeders==null?'?':t.seeders)+' seeders'):(t.source||''));
-var badge=t._verdict?('<span class="vbadge '+esc(t._verdict)+'" title="the AI\'s verdict, confidence '+Math.round((t._conf||0)*100)+'%">'+esc(t._verdict)+' '+Math.round((t._conf||0)*100)+'%</span>'):'';
+var badge=t._verdict?('<span class="vbadge '+esc(t._verdict)+'" title="'+(t._verdict==='exact'?'exact = the AI judged this to be the target itself':'variant = the target\'s content under another title, edition or quality')+' — confidence '+Math.round((t._conf||0)*100)+'%. Its reason is the line below.">'+esc(t._verdict)+' '+Math.round((t._conf||0)*100)+'%</span>'):'';
 var live=(t._live===false)?'<span style="color:#f85149">✗ dead</span>':(t._live===true?'<span style="color:#3fb950">✓ live</span>':'');
 var sz=_hsize(t.size);
 return '<div class=t><div class=tn>'+esc(t.title)+' '+badge+'</div><div class=meta><span class=tag>'+esc(t.source||'')+'</span>'+(sz?'<span>'+sz+'</span>':'')+(t._via?'<span style="color:#8b949e">via “'+esc(String(t._via).slice(0,40))+'”</span>':'')+'<span>'+esc(seed)+'</span>'+live+act+'</div>'+(t._why?'<div class=hwhy>'+esc(t._why)+'</div>':'')+'</div>';}).join('');window.scrollTo(0,_y);}
@@ -2338,8 +2395,8 @@ function libOpen(idx){
     var dlUrl = '/stream?id=' + encodeURIComponent(it.id) + '&f=' + f.i;
     var playBtn = '';
     if (f.playable && (f.kind === 'video' || f.kind === 'audio')) {
-      playBtn = '<button class="lib-play" onclick="libPlay(' + idx + ',' + i + ')">▶ Play</button>'
-              + '<button class="lib-vlc" onclick="libExternal(' + idx + ',' + i + ')">📺 VLC / app</button>';
+      playBtn = '<button class="lib-play" title="Play here: the file is decoded in the no-network sandbox on the server and streamed to this browser. Starts in seconds; quality adapts to your connection (selector under the player)." onclick="libPlay(' + idx + ',' + i + ')">▶ Play</button>'
+              + '<button class="lib-vlc" title="Hand the original file to VLC / Infuse / any player on this device via a short-lived link scoped to this one file — full quality, no conversion. Best for HEVC/4K." onclick="libExternal(' + idx + ',' + i + ')">📺 VLC / app</button>';
     }
     filesHtml += '<div class="lib-file">'
       + '<span class="lib-fname">' + libEsc(f.name || ('file ' + f.i)) + '</span>'
