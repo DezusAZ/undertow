@@ -109,7 +109,13 @@ _profile_min = None    # optional: (goal, category, description) -> the no-model
 _reflect_fn = None     # optional: (hunt) -> True if it updated journal/profile (called each cycle)
 
 _EVENTS_KEEP = 80      # per-hunt activity log (ring buffer) for the live view
-_PROFILE_RETRY_S = 1800
+# Profile retry cadence when the model could not build one: 60 s, doubling, capped at 30 min.
+# The first hunt after idle is created while Ollama is still being started on demand (a cold
+# start takes a few minutes), so a fixed 30-minute retry left that hunt judging with the stub
+# for half an hour — the newcomer's first impression. A retry is a cheap gate check when the
+# AI is still down, and one model call once it is up.
+_PROFILE_RETRY_MIN = 60
+_PROFILE_RETRY_MAX = 1800
 
 
 def set_backends(generate=None, execute=None, judge=None, verify=None, notify=None,
@@ -161,7 +167,9 @@ def _ensure_profile(h):
                                             h.get("description", ""))
         except Exception:
             pass
-    if _profile_fn and now - float(h.get("_profile_attempt", 0)) >= _PROFILE_RETRY_S:
+    fails = int(h.get("_profile_fails", 0))
+    wait = min(_PROFILE_RETRY_MAX, _PROFILE_RETRY_MIN * (2 ** min(fails, 6)))
+    if _profile_fn and now - float(h.get("_profile_attempt", 0)) >= wait:
         h["_profile_attempt"] = now
         try:
             built = _profile_fn(h.get("goal", ""), h.get("category", ""), h.get("description", ""))
@@ -169,10 +177,13 @@ def _ensure_profile(h):
             built = None
         if built:
             h["profile"] = built
+            h["_profile_fails"] = 0
             _event(h, kind="profile", title=built.get("canonical_title", ""),
                    aliases=len(built.get("aliases", [])), conf=built.get("knowledge_confidence"))
             return built
-        _event(h, kind="profile-unavailable")
+        h["_profile_fails"] = fails + 1
+        if fails == 0:                       # log once, not every minute while the AI wakes up
+            _event(h, kind="profile-unavailable")
     return h.get("profile")
 
 

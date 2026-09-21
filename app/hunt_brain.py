@@ -81,6 +81,8 @@ def _use_llm():
 
 
 _last_llm_ts = 0.0            # when the local model last actually ran (proves the AI is working)
+_unreach_since = 0.0          # when Ollama first failed to answer while hunts were waiting on it
+_WAKE_GRACE_S = int(os.environ.get("HUNT_WAKE_GRACE", "420"))   # cold start: container + libs + model
 
 
 def _mark_llm():
@@ -117,7 +119,25 @@ def brain_status():
     failing = bool(st.get("calls")) and st.get("last_fail_ts", 0) > st.get("last_ok_ts", 0)
     gated = enabled and gpu and not busy
     using = gated and reachable and not failing
-    reason = ("ai-off" if not enabled else "unreachable" if not reachable
+    # Ollama is started ON DEMAND by the watchdog when a hunt exists: for the first few minutes
+    # of the first hunt after idle "unreachable" just means "still booting the model" — say so,
+    # and only call it dead once it has stayed down for a while with hunts waiting on it.
+    waking = False
+    if enabled and not reachable:
+        try:
+            active = any(x.get("status") in ("running", "idle") for x in hunt.list_hunts())
+        except Exception:
+            active = False
+        global _unreach_since
+        if active or ai.wake_fresh():
+            if not _unreach_since:
+                _unreach_since = time.time()
+            waking = (time.time() - _unreach_since) < _WAKE_GRACE_S
+        else:
+            _unreach_since = 0.0
+    elif reachable:
+        _unreach_since = 0.0
+    reason = ("ai-off" if not enabled else "waking" if waking else "unreachable" if not reachable
               else "gpu-not-ready" if not gpu else "box-busy" if busy
               else "failing" if failing else "active")
     last = None

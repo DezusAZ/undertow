@@ -63,9 +63,11 @@ const WAIT_RESULTS_MS = +(process.env.WAIT_RESULTS_MS || 420000);
     check(!err.trim(), 'no create error shown' + (err ? ' [' + err + ']' : ''));
 
     // profile + activity
+    // The AI is started on demand: the first hunt after idle waits for a cold start (container,
+    // libraries, model) before the profile can be built. Allow for it.
     let prof = '';
     const t0 = Date.now();
-    while (Date.now() - t0 < 150000) {
+    while (Date.now() - t0 < +(process.env.WAIT_PROFILE_MS || 360000)) {
       prof = (await page.locator('#hprof-' + hid).innerText().catch(() => '')) || '';
       if (/target/i.test(prof) && !/building/i.test(prof)) break;
       await page.waitForTimeout(3000);
