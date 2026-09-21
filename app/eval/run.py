@@ -18,6 +18,10 @@ import urllib.request
 
 sys.path.insert(0, "/app")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Evaluate WORKING-TREE code without rebuilding the image: copy app/ somewhere in the
+# container and point EVAL_APP_DIR at it (the app process keeps running its own code).
+if os.environ.get("EVAL_APP_DIR"):
+    sys.path.insert(0, os.environ["EVAL_APP_DIR"])
 
 APP_URL = os.environ.get("EVAL_APP_URL", "http://127.0.0.1:%s" % os.environ.get("PORT", "8722"))
 
@@ -97,6 +101,21 @@ def run_target(t, args, app, recording, record_out):
     h = _new_hunt(t)
     gen = hunt_brain.generate if args.brain == "llm" else hunt._stub_generate
     judge = hunt_brain.judge if args.brain == "llm" else hunt._stub_judge
+    if args.brain == "llm" and hasattr(hunt, "_ensure_profile"):
+        # wire the same L1/L7 backends vt.py wires at startup, so the loop below IS the worker
+        hunt.set_backends(generate=hunt_brain.generate,      # _replenish() plans through this
+                          profile=getattr(hunt_brain, "build_profile", None),
+                          profile_min=getattr(hunt_brain, "minimal_profile", None),
+                          reflect=getattr(hunt_brain, "reflect", None))
+        t0 = time.time()
+        hunt._ensure_profile(h)                  # L1: build the target profile like the worker does
+        if not args.quiet:
+            print("  profile step: %.1fs built_by=%s" % (time.time() - t0, (h.get("profile") or {}).get("built_by")), flush=True)
+        p = h.get("profile") or {}
+        if not args.quiet and p.get("built_by") == "llm":
+            print("  profile: %s | aliases=%s | creators=%s | conf=%s" % (
+                p.get("canonical_title"), p.get("aliases", [])[:4], p.get("creators", [])[:4],
+                p.get("knowledge_confidence")), flush=True)
 
     def execute(strategy, hh):
         k = hunt._strat_key(strategy)
@@ -111,6 +130,11 @@ def run_target(t, args, app, recording, record_out):
     first_hit, log = None, []
     t_start = time.time()
     for cycle in range(1, args.cycles + 1):
+        if args.brain == "llm" and h["frontier"] and hasattr(hunt, "_replenish"):
+            added = hunt._replenish(h)
+            if added and not args.quiet:
+                print("  plan: +%d strategies (%s)" % (added, ", ".join(
+                    sorted({str(s.get("source") or s.get("method")) for s in h["frontier"]})[:8])), flush=True)
         if not h["frontier"]:
             new = gen(h) or []
             if not hunt._add_strategies(h, new):
@@ -138,7 +162,22 @@ def run_target(t, args, app, recording, record_out):
         h["stats"]["cycles"] += 1
         h["stats"]["executed"] += 1
         new = len(h["results"]) - before
-        hunt._note_method(h, strategy.get("method", "search"), new)
+        hunt._note_method(h, strategy.get("method", "search"), new, source=strategy.get("source"))
+        hunt._event(h, kind="cycle", method=strategy.get("method", "search"),
+                    source=strategy.get("source", ""), query=strategy.get("query", "")[:120],
+                    why=strategy.get("why", "")[:120], results=len(results), kept=len(matches),
+                    new=new, leads=len(leads or []))
+        if args.brain == "llm" and hunt._reflect_fn is not None:
+            try:
+                if hunt._reflect_fn(h) and not args.quiet:
+                    j = h.get("journal") or {}
+                    print("  reflect: %s — %s" % (j.get("direction"), (j.get("note") or "")[:110]), flush=True)
+            except Exception as e:
+                log.append({"cycle": cycle, "event": "reflect-error", "err": str(e)[:120]})
+        if args.debug and hasattr(hunt_brain, "_judge_v2") and getattr(hunt_brain._judge_v2, "LAST", None):
+            for v in hunt_brain._judge_v2.LAST.get("verdicts", [])[:12]:
+                print("      %-7s %.2f  %s  — %s" % (v.get("verdict"), v.get("confidence", 0),
+                                                   v.get("title", "")[:60], v.get("reason", "")[:70]))
         hit_now = [r for r in h["results"][before:] if _matches(t, r)]
         if hit_now and first_hit is None:
             first_hit = cycle
@@ -184,6 +223,7 @@ def main():
     ap.add_argument("--out", default="", help="write the summary JSON here")
     ap.add_argument("--pw", default="")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--debug", action="store_true", help="print the judge's per-row verdicts each cycle")
     args = ap.parse_args()
 
     # model override without touching the app's own /config/ai.json: point ai.py at a

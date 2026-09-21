@@ -101,6 +101,30 @@ def adapter_names():
     return [getattr(m, "NAME", m.__name__.rsplit(".", 1)[-1]) for m in _load()]
 
 
+def adapter_info():
+    """[{module, name, categories, deep}] — what the Deep Hunt source manifest is built from."""
+    out = []
+    for m in _load():
+        out.append({"module": m.__name__.rsplit(".", 1)[-1],
+                    "name": getattr(m, "NAME", m.__name__.rsplit(".", 1)[-1]),
+                    "categories": sorted(getattr(m, "CATEGORIES", None) or []),
+                    "deep": _is_deep(m)})
+    return out
+
+
+def search_one(module, query, category="", timeout=15):
+    """Run ONE adapter by module name (e.g. "arxiv", "github"), bypassing the category
+    gating and the deep-tier exclusion — this is how a hunt strategy aimed at a specific
+    source reaches it even when the hunt's own category would never route there. Same
+    health accounting as the fan-out. [] if unknown."""
+    for m in _load():
+        if m.__name__.rsplit(".", 1)[-1] == module:
+            if _cooling(getattr(m, "NAME", module)):
+                return []
+            return _safe_search(m, query, category, timeout)
+    return []
+
+
 def _safe_search(mod, query, category, timeout):
     name = getattr(mod, "NAME", mod.__name__.rsplit(".", 1)[-1])
     t0 = time.time()

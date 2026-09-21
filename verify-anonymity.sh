@@ -194,6 +194,41 @@ case "$BYPASS" in
   *)         warn "bridge-bypass check inconclusive (${BYPASS:-no answer})" ;;
 esac
 
+# --- 4c. the ONE routing exception -------------------------------------------
+# The kill-switch may route exactly one host outside the tunnel: the local-AI (Ollama)
+# server, as a /32, and only if it is a private address. Anything broader (a whole LAN
+# range, a public host) is a leak path. Every other private host must still be routed
+# into the tunnel (where it goes nowhere — that is the point).
+echo; bold "Routing exceptions"
+# rule lines look like "990:  from all to 192.168.0.195 lookup main" -> keep "990: 192.168.0.195"
+EXC="$(dex "$CTR" "ip rule show 2>/dev/null | grep -E 'to [0-9./]+ lookup main' | grep -vE '^(998|32766|32767):' | awk '{print \$1, \$5}'")"
+NEXC="$(printf '%s\n' "$EXC" | grep -c . 2>/dev/null || true)"
+NEXC="${NEXC:-0}"
+if [ "$NEXC" -eq 0 ]; then
+  ok "no routing exceptions — everything goes into the tunnel (no local AI configured)"
+elif [ "$NEXC" -eq 1 ]; then
+  HOST="$(printf '%s\n' "$EXC" | awk '{print $2}')"
+  PRIO="$(printf '%s\n' "$EXC" | awk '{print $1}' | tr -d ':')"
+  case "$HOST" in
+    */*) bad "!!! routing exception is a RANGE ($HOST) — must be a single /32 host" ;;
+    10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|192.168.*|100.[6-9][4-9].*|100.1[0-2][0-9].*)
+      if [ "${PRIO:-1000}" -lt 999 ]; then
+        ok "exactly one routing exception: $HOST (the local-AI host, private, priority $PRIO)"
+      else
+        warn "routing exception for $HOST sits at priority $PRIO — after the tunnel catch-all (999), so it is dead (AI unreachable)"
+      fi ;;
+    *) bad "!!! routing exception points at a NON-private host ($HOST) — that host would see your real IP" ;;
+  esac
+else
+  bad "!!! $NEXC routing exceptions found (expected at most one, the local-AI host):"; printf '%s\n' "$EXC" | sed 's/^/        /'
+fi
+OTHER="$(dex "$CTR" 'ip -4 route get 192.168.255.254 2>/dev/null | head -1')"
+case "$OTHER" in
+  *"dev wg"*) ok "an arbitrary LAN host is still routed into the tunnel (no LAN-wide bypass)" ;;
+  "")         warn "could not evaluate the LAN route" ;;
+  *)          bad "!!! LAN hosts are routed around the tunnel: $OTHER" ;;
+esac
+
 # --- 5. torrent engine is bound to the tunnel --------------------------------
 echo; bold "Torrent engine"
 LISTEN="$(dex "$CTR" "ss -lnp 2>/dev/null | grep -m1 ':6881' | awk '{print \$5}'")"

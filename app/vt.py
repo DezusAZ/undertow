@@ -63,6 +63,10 @@ try:
 except Exception:
     notify = None
 try:
+    import fetcher  # local module: direct-download engine for plain file URLs (open dirs, archives)
+except Exception:
+    fetcher = None
+try:
     import ai  # local module: optional local-AI (Ollama) features — off by default
 except Exception:
     ai = None
@@ -335,6 +339,11 @@ def monitor():
                 print("[vpntorrent] VPN recovered — reopened libtorrent sockets", flush=True)
             except Exception as e:
                 print(f"[vpntorrent] socket reopen failed: {e}", flush=True)
+            if fetcher is not None:
+                try:
+                    fetcher.resume_paused()          # direct downloads parked during the drop
+                except Exception:
+                    pass
         was_ok = ok
         vpn_ok = ok
         with _lock:
@@ -1547,6 +1556,21 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 .huntrecent:empty{display:none}
 .huntres{margin-top:12px;border-top:1px solid var(--hair);padding-top:6px}
 .huntres .t{background:rgba(11,25,19,.4);padding:11px 13px;margin:8px 0}
+.hunterr{font-size:12.5px;color:#f85149;margin:0 0 8px}.hunterr:empty{display:none}
+.huntprof{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}.huntprof b{color:var(--text)}
+.huntprof .pk{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-right:4px}
+.huntnow{font-size:12.5px;margin-top:8px;color:var(--text);line-height:1.45}.huntnow .why{color:var(--muted);font-style:italic}
+.huntyield{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.huntyield span{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--hair);color:var(--muted);font-variant-numeric:tabular-nums}
+.huntyield span.hot{border-color:rgba(52,221,125,.45);color:#3fb950}
+.huntlog{margin-top:10px;border-top:1px solid var(--hair);padding-top:6px;font-size:12px;font-variant-numeric:tabular-nums}
+.huntlog .ev{display:grid;grid-template-columns:52px 1fr auto;gap:8px;padding:4px 0;border-bottom:1px dashed rgba(255,255,255,.05);align-items:baseline}
+.huntlog .ev .t{color:var(--faint);background:none;padding:0;margin:0}.huntlog .ev .q{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.huntlog .ev .q i{color:var(--muted);font-size:11.5px}.huntlog .ev .n{color:var(--muted);white-space:nowrap}.huntlog .ev .n b{color:#3fb950}
+.huntjournal{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5;border-left:2px solid rgba(52,221,125,.35);padding-left:9px}
+.hwhy{font-size:12px;color:var(--muted);margin-top:4px;font-style:italic}
+.vbadge{font-size:10.5px;padding:1px 6px;border-radius:4px;border:1px solid var(--hair);text-transform:uppercase;letter-spacing:.04em}
+.vbadge.exact{color:#3fb950;border-color:rgba(52,221,125,.45)}.vbadge.variant{color:#d29922;border-color:rgba(210,153,34,.45)}
 .lib-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
 .lib-search{flex:1 1 240px;min-width:0;background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);color:var(--text);font:inherit;font-size:15px;padding:12px 14px;outline:none}
 .lib-search::placeholder{color:var(--faint)}
@@ -1670,8 +1694,9 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 <select id=hpace title="how hard to grind"><option value=gentle>Gentle</option><option value=normal selected>Normal</option><option value=aggressive>Aggressive</option></select>
 <label class=huntwatch title="Keep watching: once it runs out of ideas, re-sweep on a schedule so files uploaded LATER are still caught. Pairs with notifications."><input type=checkbox id=hwatch onchange="document.getElementById('hsweep').disabled=!this.checked"> 👁 Keep watching</label>
 <select id=hsweep disabled title="how often to re-sweep for new uploads"><option value=6h>every 6h</option><option value=daily selected>daily</option><option value=weekly>weekly</option></select>
+<input type=text id=hdesc class=hdesc placeholder="what counts as FOUND — e.g. the 2019 compilation, or any complete original album by these artists; FLAC preferred (the AI treats this as the rule)" autocomplete=off>
 <button id=hgo>🔦 Start hunt</button></form>
-<input type=text id=hdesc class=hdesc placeholder="optional — what a good match looks like (helps the AI judge results)" autocomplete=off>
+<div id=hunterr class=hunterr></div>
 <div id=huntbrain class=huntbrain></div>
 <div id=hunts></div>
 </div>
@@ -1800,6 +1825,7 @@ var typ=t.category?('<span class=typ>'+esc(t.category)+'</span>'):'';
 var dt=t.date?('<span style="color:#8b949e">'+esc(String(t.date).slice(0,10))+'</span>'):'';
 var act;
 if(t.magnet||t.torrent_url||t.nzb_id){act='<button class=sec onclick="dl('+i+',this)">⬇ Download</button>';}
+else if(t.url&&isFileUrl(t)){act='<button class=sec onclick="dlUrl(R['+i+'],this)">⬇ Download</button><a class="sec" style="text-decoration:none" href="'+esc(t.url)+'" target=_blank rel=noopener>↗</a>';}
 else if(t.url){act='<a class="sec" style="text-decoration:none" href="'+esc(t.url)+'" target=_blank rel=noopener>Open ↗</a>';}
 else{act='';}
 var xp=AI_ON?('<button class=aiexplain onclick="explainResult('+i+',this)">✨ Explain</button>'):'';
@@ -1839,10 +1865,24 @@ if(d.vpn){v.className='vpn ok';v.innerHTML='<span><b>Protected</b> — traffic r
 else{v.className='vpn bad';v.innerHTML='<span><b>VPN not connected</b> — downloads are disabled until the tunnel is up.</span>'}
 document.getElementById('go').disabled=!d.vpn;
 let L=document.getElementById('list');
-var UN=d.usenet||[];var TOT=d.torrents.length+UN.length;
+var UN=d.usenet||[];var DR=d.direct||[];var TOT=d.torrents.length+UN.length+DR.length;
 var dc=document.getElementById('dlcount');if(dc)dc.textContent=TOT?'('+TOT+')':'';
 document.getElementById('dlempty').style.display=TOT?'none':'block';
 if(!TOT){L.innerHTML='';return}
+// Direct file downloads (open directories, archive mirrors) — same list, same look.
+var dh=DR.map(u=>{var failed=u.state==='Failed';var done=u.state==='Done';
+var col=failed?'#f85149':(done?'#3fb950':(u.paused?'#8b949e':'#238636'));
+var acts='<button class=sec onclick="directDel(\''+u.id+'\',0)">✕ Remove</button>'+
+         (done?'':'<button class=sec onclick="directDel(\''+u.id+'\',1)">🗑 Remove + delete file</button>');
+return '<div class=t><div class=tn>'+esc(u.name)+'</div>'+
+'<div class=bar><div class=fill style="width:'+u.progress+'%;background:'+col+'"></div></div>'+
+'<div class=meta><span class=tag>direct</span><span class=tag>'+esc(u.cat)+'</span>'+
+'<span>'+u.progress+'% · '+esc(u.state)+'</span>'+
+(u.size?'<span>'+esc(String(u.size))+'</span>':'')+
+(u.speed?'<span>'+fmt(u.speed)+'/s</span>':'')+
+(u.host?'<span style="color:#8b949e">'+esc(u.host)+'</span>':'')+
+(u.error?'<span style="color:#f85149">'+esc(u.error)+'</span>':'')+
+'</div><div class=acts>'+acts+'</div></div>';}).join('');
 // Usenet transfers live in SABnzbd, not in the torrent engine. They used to be
 // invisible here — "added" and then nothing — so render them in the same list.
 var uh=UN.map(u=>{var failed=u.state==='Failed';
@@ -1857,7 +1897,7 @@ return '<div class=t><div class=tn>'+esc(u.name)+'</div>'+
 (u.eta?'<span>ETA '+esc(u.eta)+'</span>':'')+
 (u.error?'<span style="color:#f85149">'+esc(u.error)+'</span>':'')+
 '</div><div class=acts>'+acts+'</div></div>';}).join('');
-L.innerHTML=uh+d.torrents.map(t=>{let done=t.finished;let col=done?'#3fb950':(t.state[0]=='P'?'#8b949e':'#238636');
+L.innerHTML=dh+uh+d.torrents.map(t=>{let done=t.finished;let col=done?'#3fb950':(t.state[0]=='P'?'#8b949e':'#238636');
 let b='';
 if(done){b=`<button class=sec onclick="rc('${t.ih}')">↻ Recheck</button>`;}
 else if(t.upaused){b=`<button class=sec onclick="rs('${t.ih}')" ${VPN?'':'disabled'}>▶ Resume</button><button class=sec onclick="rc('${t.ih}')">↻ Recheck</button>`;}
@@ -1868,6 +1908,23 @@ return `<div class=t><div class=tn>${esc(t.name)}</div>
 <div class=meta><span class=tag>${t.cat}</span><span>${t.progress}% · ${t.state}</span>
 <span>${fmt(t.done)} / ${fmt(t.size)}</span><span>↓ ${rate(t.dl)}</span><span>${t.peers} peers</span></div>
 <div class=acts>${b}</div></div>`}).join('')}
+async function directDel(id,withFiles){
+  if(withFiles && !confirm('Remove this download AND delete its file?'))return;
+  try{var r=await fetch('/direct/remove?id='+encodeURIComponent(id)+'&delete='+(withFiles?1:0),{method:'POST'});
+    var j=await r.json();if(!j.ok)alert('Could not remove it.');}catch(e){alert('Could not reach the app to remove it.');}
+  tick();}
+// A plain file URL (open directory, archive mirror) is downloadable too — through the VPN, into
+// the category folder, scanned like everything else. Web PAGES are not files: keep those as links.
+function isFileUrl(t){var u=String(t.url||'');if(!/^https?:\/\//i.test(u))return false;
+if(/^Open dir/.test(t.source||''))return !/\/$/.test(u)&&!/\[open dir\]$/.test(t.title||'');
+var p=u.split('?')[0].split('#')[0];return /\.(zip|rar|7z|tar|gz|bz2|xz|iso|img|bin|exe|msi|dmg|apk|pdf|epub|mobi|djvu|txt|doc|docx|mp3|flac|wav|ogg|m4a|aac|opus|mp4|mkv|avi|mov|webm|m4v|ts|jpg|jpeg|png|gif|tif|tiff|csv|json|xml|nzb|torrent)$/i.test(p);}
+async function dlUrl(t,btn){if(!VPN){alert('Connect the VPN before downloading.');return}
+btn.disabled=true;btn.textContent='Adding…';
+var body='cat='+encodeURIComponent(t.category||'other')+'&url='+encodeURIComponent(t.url)+'&name='+encodeURIComponent((t.title||'').replace(/\s+\[open dir\]$/,''));
+try{var res=await hfetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
+if(res.ok){btn.textContent='Added ✓';}else{var txt='';try{txt=(await res.text()).slice(0,100);}catch(_){}btn.disabled=false;btn.textContent='⚠ Retry';alert('Not added: '+(txt||('HTTP '+res.status)));}}
+catch(e){btn.disabled=false;btn.textContent='⚠ Retry';}
+tick();}
 async function nzbDel(id,withFiles){
   if(withFiles && !confirm('Remove this usenet download AND delete its files?'))return;
   try{var r=await fetch('/nzb/remove?id='+encodeURIComponent(id)+'&delete='+(withFiles?1:0),{method:'POST'});
@@ -1877,16 +1934,23 @@ async function nzbDel(id,withFiles){
   tick();}
 var HUNT_EXPANDED={};var HUNT_RES={};var huntTimer=null;
 function huntTabActive(){var p=document.getElementById('tab-hunt');return p&&!p.hidden;}
+function huntErr(msg){var el=document.getElementById('hunterr');if(el)el.textContent=msg||'';}
+// A fetch that treats "logged out" honestly: the server answers 401 for XHR paths, but if a
+// 302 ever sneaks through (older builds), r.redirected/r.url tells us the same thing.
+async function hfetch(url,opts){var r=await fetch(url,opts);if(r.status==401||(r.redirected&&/\/login/.test(r.url))){location.href='/login';throw new Error('login');}return r;}
 async function createHunt(e){e.preventDefault();var g=document.getElementById('hgoal').value.trim();if(!g)return;
-var btn=document.getElementById('hgo');btn.disabled=true;btn.textContent='Starting…';
+var btn=document.getElementById('hgo');btn.disabled=true;btn.textContent='Starting…';huntErr('');
 var body={goal:g,category:document.getElementById('hcat').value,pace:document.getElementById('hpace').value,description:document.getElementById('hdesc').value.trim(),watch:document.getElementById('hwatch').checked,sweep:document.getElementById('hsweep').value};
 if(body.watch)reqNotifyPerm();
-try{var r=await fetch('/hunt/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.status==401){location.href='/login';return}
-document.getElementById('hgoal').value='';document.getElementById('hdesc').value='';}catch(err){}
+try{var r=await hfetch('/hunt/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+var j={};try{j=await r.json();}catch(_){}
+if(!r.ok||j.ok===false||j.error){huntErr('Could not start the hunt: '+(j.error||('HTTP '+r.status))+(r.status==403?' — reload the page and try again.':''));}
+else{document.getElementById('hgoal').value='';document.getElementById('hdesc').value='';}}
+catch(err){if(String(err.message)!=='login')huntErr('Could not start the hunt: '+err.message);}
 btn.disabled=false;btn.textContent='🔦 Start hunt';loadHunts();}
-var _huntStruct='';
-async function loadHunts(){var r;try{r=await fetch('/hunt/list');}catch(e){return}if(r.status==401){location.href='/login';return}
-var L=await r.json();var el=document.getElementById('hunts');if(!el)return;
+var _huntStruct='';var _huntsBusy=false;
+async function loadHunts(){if(_huntsBusy||document.hidden)return;_huntsBusy=true;var r;try{r=await hfetch('/hunt/list');}catch(e){_huntsBusy=false;return}
+var L;try{L=await r.json();}catch(e){_huntsBusy=false;return}_huntsBusy=false;var el=document.getElementById('hunts');if(!el)return;
 huntNotifyCheck(L);loadBrainStatus();
 if(!L.length){el.innerHTML='<div class=empty>No hunts running. Start one above — it keeps grinding in the background (even across reboots) until you stop it.</div>';_huntStruct='';return}
 // The card STRUCTURE = which hunts exist + whether each is stopped (that changes the buttons). We
@@ -1898,59 +1962,121 @@ if(struct!==_huntStruct){var y=window.scrollY;el.innerHTML=L.map(renderHunt).joi
 else{L.forEach(updateHuntCard);}
 for(var i=0;i<L.length;i++){if(HUNT_EXPANDED[L[i].id])loadHuntResults(L[i].id);}}
 async function loadBrainStatus(){var el=document.getElementById('huntbrain');if(!el)return;
-var s;try{s=await (await fetch('/hunt/brain')).json();}catch(e){return}
-var col,icon,msg;
-if(s.using_llm){col='#3fb950';icon='🧠';var la=(s.last_used_s!=null)?(' · last thought '+(s.last_used_s<60?(s.last_used_s+'s'):(Math.round(s.last_used_s/60)+'m'))+' ago'):' · warming up…';msg='Local AI brain <b>active</b> — inventing angles + judging finds on the GPU'+la;}
+var s;try{s=await (await hfetch('/hunt/brain')).json();}catch(e){return}
+var col,icon,msg;var calls=(s.llm_calls||0);var tally=calls?(' · <span title="model calls this session: answered / failed">'+(s.llm_ok||0)+' answered, '+(s.llm_fail||0)+' failed</span>'):'';
+var ago=function(x){return x<60?(x+'s'):(Math.round(x/60)+'m')};
+if(s.using_llm){col='#3fb950';icon='🧠';var la=(s.last_used_s!=null)?(' · last thought '+ago(s.last_used_s)+' ago'):' · first call pending';msg='Local AI brain <b>active</b> — building target profiles, aiming searches, judging finds on the GPU'+la+tally;}
 else if(s.reason==='ai-off'){col='#d29922';icon='💤';msg='Local AI is <b>off</b> — hunting in basic mode (works, just less clever). Turn it on in <b>Engines → Local AI</b> for smarter, deeper hunts + better filtering.';}
-else if(s.reason==='gpu-not-ready'){col='#d29922';icon='⏳';msg='Local AI is on, <b>GPU warming up</b> (the model spins up when a hunt is active) — it\'ll kick in shortly.';}
-else if(s.reason==='box-busy'){col='#d29922';icon='⏸';msg='Local AI <b>paused — box busy</b>; it resumes automatically when load drops (so other apps stay smooth).';}
+else if(s.reason==='unreachable'){col='#f85149';icon='⚠';msg='Local AI is on but the Ollama server <b>does not answer</b>'+(s.last_error?(' — '+esc(String(s.last_error).slice(0,90))):'')+'. Hunts continue in basic mode. Check <b>Engines → Local AI → Server</b>.';}
+else if(s.reason==='failing'){col='#f85149';icon='⚠';msg='Local AI is reachable but the <b>last call failed</b>'+(s.last_error?(' — '+esc(String(s.last_error).slice(0,110))):'')+'. Hunts continue in basic mode until it answers again.'+tally;}
+else if(s.reason==='gpu-not-ready'){col='#d29922';icon='⏳';msg='Local AI is on but the <b>GPU is not confirmed healthy</b> (the watchdog checks it every cycle; the model is never run on the CPU). Basic mode until it clears.';}
+else if(s.reason==='box-busy'){col='#d29922';icon='⏸';msg='Local AI <b>paused — CPU saturated</b>; it resumes automatically when pressure drops (so other apps stay smooth).';}
 else{col='#8b949e';icon='🧠';msg='Local AI status unavailable.';}
 el.style.borderColor=col;el.innerHTML='<span style="color:'+col+'">'+icon+' '+msg+'</span>';}
 function _hcol(st){return {running:'#3fb950',idle:'#d29922',stopped:'#8b949e'}[st]||'#8b949e';}
 function _hstat(h){return (h.watch?('👁 watching·'+esc(h.sweep||'')+' · '):'')+esc(h.status)+' · '+esc(h.pace);}
 function _hmeta(h){var s=h.stats||{};return '<span>🔁 '+(s.cycles||0)+' cycles</span><span>📦 '+(h.result_count||0)+' found</span><span>🧭 '+(s.leads||0)+' leads</span><span>⏳ '+(h.frontier_size||0)+' queued</span>'+(s.new_last?'<span style="color:#3fb950">+'+s.new_last+' new</span>':'')+(h.watch&&s.sweeps?'<span title="times re-swept for new uploads">🔄 '+s.sweeps+' sweeps</span>':'');}
-function _hrec(h){var rr=(h.tried_recent||[]).slice(0,3).map(function(t){return esc(String(t.query||'').slice(0,54))}).join(' · ');return rr?('trying: '+rr):'';}
+// "What is it doing right now": the last cycle from the activity log (source, query, why, yield).
+function _hrec(h){var ev=(h.events||[]).filter(function(e){return e.kind==='cycle'});var e=ev[ev.length-1];
+if(!e){var rr=(h.tried_recent||[]).slice(0,3).map(function(t){return esc(String(t.query||'').slice(0,54))}).join(' · ');return rr?('trying: '+rr):'';}
+var lane=esc(e.source||e.method||'');return '<span class=tag>'+lane+'</span> '+esc(String(e.query||'').slice(0,90))+' <span style="color:var(--faint)">→ '+(e.results||0)+' results, '+(e.kept||0)+' kept, '+(e.new||0)+' new</span>'+(e.why?'<div class=why>'+esc(String(e.why).slice(0,140))+'</div>':'');}
+function _hprof(h){var p=h.profile;if(!p||p.built_by!=='llm')return (h.status!=='stopped'&&AI_ON)?'<span class=pk>profile</span><span style="color:var(--faint)">building… (the AI works out what this target actually is first)</span>':'';
+var bits=['<span class=pk>target</span><b>'+esc(p.canonical_title||'')+'</b>'+(p.year_or_era?' <span style="color:var(--faint)">('+esc(p.year_or_era)+')</span>':'')];
+if((p.aliases||[]).length)bits.push('<span class=pk>aka</span>'+esc(p.aliases.slice(0,4).join(' · ')));
+if((p.creators||[]).length)bits.push('<span class=pk>by</span>'+esc(p.creators.slice(0,4).join(' · ')));
+if((p.near_misses_to_reject||[]).length)bits.push('<span class=pk>not</span><span style="color:var(--faint)">'+esc(p.near_misses_to_reject.slice(0,3).join(' · '))+'</span>');
+if(p.knowledge_confidence!=null&&p.knowledge_confidence<0.4)bits.push('<span style="color:#d29922">⚠ the AI is not confident it knows this target — a precise description helps</span>');
+return bits.join('<br>');}
+function _hjournal(h){var j=h.journal;if(!j)return '';var parts=[];
+if(j.note)parts.push('<b>'+esc(j.direction||'')+'</b> — '+esc(j.note));
+if((j.facts||[]).length)parts.push('<span class=pk>learned</span>'+esc(j.facts.slice(-3).join(' · ')));
+if((j.hosts||[]).length)parts.push('<span class=pk>promising</span>'+esc(j.hosts.slice(-3).join(' · ')));
+if((j.dead_ends||[]).length)parts.push('<span class=pk>dead ends</span><span style="color:var(--faint)">'+esc(j.dead_ends.slice(-3).join(' · '))+'</span>');
+return parts.join('<br>');}
+function _hyield(h){var ss=Object.assign({},h.method_stats||{},h.source_stats||{});var ks=Object.keys(ss);if(!ks.length)return '';
+ks.sort(function(a,b){return (ss[b].found||0)-(ss[a].found||0)||(ss[b].tries||0)-(ss[a].tries||0)});
+return ks.slice(0,10).map(function(k){var s=ss[k];return '<span class="'+((s.found||0)>0?'hot':'')+'" title="tries → finds">'+esc(k)+' '+(s.tries||0)+'→'+(s.found||0)+'</span>'}).join('');}
+function _hwhyidle(h){var s=h.stats||{};var out=[];
+if(s.last_error)out.push('<span style="color:#f85149">last error: '+esc(String(s.last_error).slice(0,100))+'</span>');
+if(s.saturated)out.push('<span style="color:#d29922">result store full (5000) — delete some or start a narrower hunt</span>');
+if(h.status==='idle')out.push('<span style="color:#d29922">idle — out of new ideas for now'+(h.watch&&h.sweep_seconds?(' · next sweep in '+Math.max(0,Math.round((h.last_sweep+h.sweep_seconds-Date.now()/1000)/3600))+'h'):' · the brain retries with a growing pause; ⚡ Rethink forces it now')+'</span>');
+return out.join('<br>');}
+function _hlog(h){var ev=(h.events||[]).slice().reverse();if(!ev.length)return '<div class=empty style="padding:8px 0">No activity yet.</div>';
+return ev.map(function(e){var t=new Date((e.ts||0)*1000);var hh=('0'+t.getHours()).slice(-2)+':'+('0'+t.getMinutes()).slice(-2);
+if(e.kind==='cycle')return '<div class=ev><span class=t>'+hh+'</span><span class=q><span class=tag>'+esc(e.source||e.method||'')+'</span> '+esc(e.query||'')+(e.why?' <i>— '+esc(e.why)+'</i>':'')+'</span><span class=n>'+(e.results||0)+' → '+(e.kept||0)+' kept → <b>'+(e.new||0)+' new</b>'+(e.leads?' · '+e.leads+' leads':'')+'</span></div>';
+if(e.kind==='profile')return '<div class=ev><span class=t>'+hh+'</span><span class=q>🧠 profiled the target: <b>'+esc(e.title||'')+'</b> ('+(e.aliases||0)+' aliases, confidence '+(e.conf!=null?Math.round(e.conf*100)+'%':'?')+')</span><span class=n></span></div>';
+if(e.kind==='reflect')return '<div class=ev><span class=t>'+hh+'</span><span class=q>🪞 reflected — <b>'+esc(e.direction||'')+'</b>'+(e.note?': '+esc(e.note):'')+'</span><span class=n>'+(e.facts||0)+' facts · '+(e.dead_ends||0)+' dead ends</span></div>';
+if(e.kind==='error')return '<div class=ev><span class=t>'+hh+'</span><span class=q style="color:#f85149">error: '+esc(e.error||'')+'</span><span class=n></span></div>';
+if(e.kind==='kick')return '<div class=ev><span class=t>'+hh+'</span><span class=q>⚡ rethink requested</span><span class=n></span></div>';
+if(e.kind==='plan')return '<div class=ev><span class=t>'+hh+'</span><span class=q>🧭 planned <b>'+(e.added||0)+'</b> new strategies'+((e.sources||[]).length?' → '+esc(e.sources.join(', ')):'')+'</span><span class=n></span></div>';
+if(e.kind==='profile-unavailable')return '<div class=ev><span class=t>'+hh+'</span><span class=q style="color:var(--faint)">AI unavailable — using the plain description as the profile for now</span><span class=n></span></div>';
+return '<div class=ev><span class=t>'+hh+'</span><span class=q>'+esc(e.kind||'')+'</span><span class=n></span></div>';}).join('');}
 function _htog(h){return (HUNT_EXPANDED[h.id]?'▾ Hide':'▸ View')+' results ('+(h.result_count||0)+')';}
+function _hlogtog(h){return (HUNT_LOG[h.id]?'▾ Hide':'▸ Show')+' activity';}
 function renderHunt(h){
 var btns=(h.status==='stopped')?'<button class=sec onclick="huntAct(\''+h.id+'\',\'resume\')">▶ Resume</button>':'<button class=sec onclick="huntAct(\''+h.id+'\',\'stop\')">⏸ Stop</button>';
+btns+='<button class=sec title="drop the idle pause and make the brain plan new angles right now" onclick="huntUpdate(\''+h.id+'\',{kick:true},this)">⚡ Rethink</button>';
+btns+='<select class=sec title="how hard to grind" onchange="huntUpdate(\''+h.id+'\',{pace:this.value},this)">'+['gentle','normal','aggressive'].map(function(p){return '<option value='+p+(h.pace===p?' selected':'')+'>'+p+'</option>'}).join('')+'</select>';
 btns+='<button class=sec onclick="huntAct(\''+h.id+'\',\'delete\')">✕ Delete</button>';
-var exp=HUNT_EXPANDED[h.id];
+var exp=HUNT_EXPANDED[h.id],lg=HUNT_LOG[h.id];
 return '<div class=hunt><div class=hunttop><div class=huntgoal><span class=huntdot id="hdot-'+h.id+'" style="background:'+_hcol(h.status)+'"></span>'+esc(h.goal)+'</div>'+
 '<span class=huntstatus id="hstatus-'+h.id+'">'+_hstat(h)+'</span></div>'+
 '<div class=meta id="hmeta-'+h.id+'">'+_hmeta(h)+'</div>'+
-'<div class=huntrecent id="hrecent-'+h.id+'">'+_hrec(h)+'</div>'+
-'<div class=acts><button class=sec id="htog-'+h.id+'" onclick="toggleHunt(\''+h.id+'\')">'+_htog(h)+'</button>'+btns+'</div>'+
+'<div class=huntprof id="hprof-'+h.id+'">'+_hprof(h)+'</div>'+
+'<div class=huntnow id="hrecent-'+h.id+'">'+_hrec(h)+'</div>'+
+'<div class=huntjournal id="hjour-'+h.id+'" '+(h.journal?'':'hidden')+'>'+_hjournal(h)+'</div>'+
+'<div class=huntyield id="hyield-'+h.id+'">'+_hyield(h)+'</div>'+
+'<div class=huntprof id="hidle-'+h.id+'">'+_hwhyidle(h)+'</div>'+
+'<div class=acts><button class=sec id="htog-'+h.id+'" onclick="toggleHunt(\''+h.id+'\')">'+_htog(h)+'</button><button class=sec id="hltog-'+h.id+'" onclick="toggleHuntLog(\''+h.id+'\')">'+_hlogtog(h)+'</button>'+btns+'</div>'+
+'<div class=huntlog id="hlog-'+h.id+'" '+(lg?'':'hidden')+'>'+_hlog(h)+'</div>'+
 '<div class=huntres id="hres-'+h.id+'" '+(exp?'':'hidden')+'></div></div>';}
+function _setHtml(id,html){var el=document.getElementById(id);if(el&&el.innerHTML!==html)el.innerHTML=html;return el;}
 function updateHuntCard(h){
 var d=document.getElementById('hdot-'+h.id);if(d)d.style.background=_hcol(h.status);
-var st=document.getElementById('hstatus-'+h.id);if(st)st.innerHTML=_hstat(h);
-var mt=document.getElementById('hmeta-'+h.id);if(mt)mt.innerHTML=_hmeta(h);
-var rc=document.getElementById('hrecent-'+h.id);if(rc)rc.innerHTML=_hrec(h);
+_setHtml('hstatus-'+h.id,_hstat(h));_setHtml('hmeta-'+h.id,_hmeta(h));_setHtml('hprof-'+h.id,_hprof(h));_setHtml('hrecent-'+h.id,_hrec(h));
+var j=_setHtml('hjour-'+h.id,_hjournal(h));if(j)j.hidden=!h.journal;
+_setHtml('hyield-'+h.id,_hyield(h));_setHtml('hidle-'+h.id,_hwhyidle(h));if(HUNT_LOG[h.id])_setHtml('hlog-'+h.id,_hlog(h));
 var tg=document.getElementById('htog-'+h.id);if(tg)tg.textContent=_htog(h);}
+var HUNT_LOG={};
+function toggleHuntLog(hid){HUNT_LOG[hid]=!HUNT_LOG[hid];var el=document.getElementById('hlog-'+hid);if(el)el.hidden=!HUNT_LOG[hid];var b=document.getElementById('hltog-'+hid);if(b)b.textContent=(HUNT_LOG[hid]?'▾ Hide':'▸ Show')+' activity';}
+async function huntUpdate(hid,patch,ctl){if(ctl)ctl.disabled=true;
+try{var r=await hfetch('/hunt/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({id:hid},patch))});var j={};try{j=await r.json();}catch(_){}
+if(!r.ok||j.ok===false)huntErr('Could not update the hunt'+(j.error?(': '+j.error):''));}catch(e){}
+if(ctl)ctl.disabled=false;loadHunts();}
 function toggleHunt(hid){HUNT_EXPANDED[hid]=!HUNT_EXPANDED[hid];var el=document.getElementById('hres-'+hid);if(!el)return;el.hidden=!HUNT_EXPANDED[hid];var tg=document.getElementById('htog-'+hid);if(tg)tg.textContent=(HUNT_EXPANDED[hid]?'▾ Hide':'▸ View')+' results ('+((HUNT_RES[hid]||[]).length||0)+')';if(HUNT_EXPANDED[hid])loadHuntResults(hid);}
+function _hsize(n){n=+n||0;if(n<=0)return '';var u=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return (i?n.toFixed(n<10?1:0):n)+' '+u[i];}
+function _safeHref(u){u=String(u||'');return /^(https?|ftp):\/\//i.test(u)?u:'';}
 async function loadHuntResults(hid){var el=document.getElementById('hres-'+hid);if(!el)return;
-var r;try{r=await fetch('/hunt/get?id='+encodeURIComponent(hid)+'&limit=100');}catch(e){return}if(!r.ok)return;var g=await r.json();
+var r;try{r=await hfetch('/hunt/get?id='+encodeURIComponent(hid)+'&limit=300');}catch(e){return}if(!r.ok)return;var g;try{g=await r.json();}catch(e){return}
 var res=g.results||[];HUNT_RES[hid]=res;
 if(!res.length){if(el.dataset.sig!=='0'){el.innerHTML='<div class=empty style="padding:14px 0">No matches yet — still hunting. Results appear here as they turn up.</div>';el.dataset.sig='0';}return}
-// skip re-rendering (and the scroll jump) when unchanged — but keyed on the DOM NODE (dataset), so
-// a div recreated by a card re-render (which has no sig) always re-renders instead of staying blank.
-var sig=res.length+'|'+((res[0]||{}).title||'')+'|'+((res[res.length-1]||{}).title||'');
+// skip re-rendering (and the scroll jump) when unchanged — keyed on the DOM NODE (dataset) so a div
+// recreated by a card re-render always re-renders. The signature covers EVERY title (a new mid-ranked
+// find used to be invisible once the list hit the old 100-row cap).
+var sig=res.length+'|'+res.map(function(t){return (t.title||'').length}).join(',');
 if(el.dataset.sig===sig)return;
 var _y=window.scrollY;el.dataset.sig=sig;
-el.innerHTML=res.map(function(t,i){var act;
+el.innerHTML=res.map(function(t,i){var act;var href=_safeHref(t.url);
 if(t.magnet||t.torrent_url||t.nzb_id)act='<button class=sec onclick="dlHunt(\''+hid+'\','+i+',this)">⬇ Download</button>';
-else if(t.url)act='<a class=sec style="text-decoration:none" href="'+esc(t.url)+'" target=_blank rel=noopener>Open ↗</a>';else act='';
-var seed=t.nzb_id?'⚡ Usenet':((t.magnet||t.torrent_url)?('▲ '+(t.seeders||0)+' seeders'):(t.source||''));
-return '<div class=t><div class=tn>'+esc(t.title)+'</div><div class=meta><span class=tag>'+esc(t.source||'')+'</span>'+(t._via?'<span style="color:#8b949e">via “'+esc(String(t._via).slice(0,40))+'”</span>':'')+'<span>'+esc(seed)+'</span>'+act+'</div></div>';}).join('');window.scrollTo(0,_y);}
+else if(href&&isFileUrl(t))act='<button class=sec onclick="dlUrl(HUNT_RES[\''+hid+'\']['+i+'],this)">⬇ Download</button><a class=sec style="text-decoration:none" href="'+esc(href)+'" target=_blank rel=noopener>↗</a>';
+else if(href)act='<a class=sec style="text-decoration:none" href="'+esc(href)+'" target=_blank rel=noopener>Open ↗</a>';else act='';
+var seed=t.nzb_id?'⚡ Usenet':((t.magnet||t.torrent_url)?('▲ '+(t.seeders==null?'?':t.seeders)+' seeders'):(t.source||''));
+var badge=t._verdict?('<span class="vbadge '+esc(t._verdict)+'" title="the AI\'s verdict, confidence '+Math.round((t._conf||0)*100)+'%">'+esc(t._verdict)+' '+Math.round((t._conf||0)*100)+'%</span>'):'';
+var live=(t._live===false)?'<span style="color:#f85149">✗ dead</span>':(t._live===true?'<span style="color:#3fb950">✓ live</span>':'');
+var sz=_hsize(t.size);
+return '<div class=t><div class=tn>'+esc(t.title)+' '+badge+'</div><div class=meta><span class=tag>'+esc(t.source||'')+'</span>'+(sz?'<span>'+sz+'</span>':'')+(t._via?'<span style="color:#8b949e">via “'+esc(String(t._via).slice(0,40))+'”</span>':'')+'<span>'+esc(seed)+'</span>'+live+act+'</div>'+(t._why?'<div class=hwhy>'+esc(t._why)+'</div>':'')+'</div>';}).join('');window.scrollTo(0,_y);}
 async function dlHunt(hid,i,btn){var t=(HUNT_RES[hid]||[])[i];if(!t)return;if(!VPN){alert('Connect the VPN before downloading.');return}
-btn.disabled=true;btn.textContent='Added ✓';
+btn.disabled=true;btn.textContent='Adding…';
 var body='cat='+encodeURIComponent(t.category||'other');
 if(t.magnet)body+='&magnet='+encodeURIComponent(t.magnet);else if(t.torrent_url)body+='&torrent_url='+encodeURIComponent(t.torrent_url);else if(t.nzb_id)body+='&nzb_id='+encodeURIComponent(t.nzb_id);
-var res=await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
-if(!res.ok){btn.disabled=false;btn.textContent='⚠ Retry';}tick()}
-async function huntAct(hid,act){if(act==='delete'&&!confirm('Delete this hunt and all its accumulated results?'))return;
-try{await fetch('/hunt/'+act,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:hid})});}catch(e){}
-if(act==='delete'){delete HUNT_EXPANDED[hid];delete HUNT_RES[hid];}loadHunts();}
+try{var res=await hfetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});
+if(res.ok){btn.textContent='Added ✓';}else{var txt='';try{txt=(await res.text()).slice(0,80);}catch(_){}btn.disabled=false;btn.textContent='⚠ Retry';huntErr('Download not added: '+(txt||('HTTP '+res.status)));}}
+catch(e){btn.disabled=false;btn.textContent='⚠ Retry';}
+tick()}
+async function huntAct(hid,act){if(act==='delete'&&!confirm('Delete this hunt and all its accumulated results?'))return;huntErr('');
+try{var r=await hfetch('/hunt/'+act,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:hid})});var j={};try{j=await r.json();}catch(_){}
+if(!r.ok||j.ok===false)huntErr('Could not '+act+' the hunt'+(j.error?(': '+j.error):(r.status==403?' — reload the page and try again.':'')));}catch(e){}
+if(act==='delete'){delete HUNT_EXPANDED[hid];delete HUNT_RES[hid];delete HUNT_LOG[hid];}loadHunts();}
 var NAV_TABS=['search','sources','hunt','engines','downloads','library'];
 var _navBusy=false;
 // Tabs used to be pure JS with no URL, so the browser's Back button left the app
@@ -1983,9 +2109,12 @@ var s={};try{s=await (await fetch('/ai/status')).json();}catch(e){}
 var st=(s.state==='ready')?('<span style="color:#3fb950">● connected · model loaded</span>'):(s.state==='starting'?('<span style="color:#d29922">● waking up… the model is loading on the GPU (first run from cold ~60–90s). If this stays amber, check the Server address below.</span>'):(s.enabled?('<span style="color:#8b949e">● idle — starts automatically the moment you use AI, and stops when idle, so the GPU isn’t running in the background.</span>'):('<span style="color:#8b949e">● off</span>')));
 var opts=(s.models||[]).map(function(m){return '<option'+(m===s.model?' selected':'')+'>'+esc(m)+'</option>';}).join('');
 if(!opts)opts='<option>'+esc(s.model||'')+'</option>';
+var warn=(s.reachable&&s.model_installed===false)?'<div style="font-size:12px;color:#f85149;margin-top:4px">⚠ The selected model is not installed on that server — pick one from the list (or pull it there first).</div>':'';
+var stt=s.stats||{};var proof=(stt.calls?('<div style="font-size:11.5px;color:#6e7681;margin-top:4px">This session: '+(stt.ok||0)+' answered · '+(stt.fail||0)+' failed'+(stt.last_latency_s!=null?(' · last '+stt.last_latency_s+'s'):'')+(stt.last_error?(' · last error: '+esc(String(stt.last_error).slice(0,80))):'')+'</div>'):'');
+var ver=s.version?(' <span style="color:#6e7681">Ollama '+esc(s.version)+(s.thinking_model?' · thinking model (reasoning switched off on the hot path)':'')+'</span>'):'';
 el.innerHTML='<div class=aiset><div class=meta style="justify-content:flex-start;margin-top:0">'+
 '<h4>✨ Local AI</h4><label class=switch style="margin-left:auto"><input type=checkbox id=aitog '+(s.enabled?'checked':'')+' onchange="saveAi()"><span class=slider></span></label></div>'+
-'<div style="font-size:12.5px;color:#8b949e;margin-top:6px">Optional. Uses your own local Ollama server for plain-English search and result explanations. Off by default; nothing leaves your machine. '+st+'</div>'+
+'<div style="font-size:12.5px;color:#8b949e;margin-top:6px">Optional. Uses your own local Ollama server for the Deep Hunt brain, plain-English search and result explanations. Off by default; nothing leaves your machine — the kill-switch opens exactly one route, to this server, and only if it is on a private address. '+st+ver+'</div>'+warn+proof+
 '<div class=row><span style="font-size:12px;color:#8b949e;width:52px">Server</span><input type=text id=aiurl value="'+esc(s.url||'')+'" placeholder="http://192.168.1.50:11434"></div>'+
 '<div class=row><span style="font-size:12px;color:#8b949e;width:52px">Model</span><select id=aimodel style="min-width:200px">'+opts+'</select><button class=sec onclick="saveAi()">Save</button></div></div>';}
 async function saveAi(){var body={enabled:document.getElementById('aitog').checked,url:document.getElementById('aiurl').value.trim(),model:document.getElementById('aimodel').value};
@@ -2895,7 +3024,12 @@ class H(BaseHTTPRequestHandler):
             self._send(200, json.dumps(library.read_status((qs.get("key") or [""])[0])),
                        "application/json")
         elif not self._authed():
-            if path in ("/status", "/library", "/token"):
+            # XHR endpoints answer 401 (the page JS redirects itself); a browser-navigation
+            # 302 here made fetch() follow to the login HTML, JSON parsing throw, and the Deep
+            # Hunt tab silently freeze after every container restart (sessions are in-memory).
+            if path in ("/status", "/library", "/token") or path.startswith(("/hunt/", "/ai/",
+                                                                              "/notify/")) \
+                    or path in ("/search", "/engines", "/sources"):
                 self._send(401, "auth required", "text/plain")
             else:
                 self._redirect("/login")
@@ -2911,7 +3045,8 @@ class H(BaseHTTPRequestHandler):
         elif path == "/status":
             self._send(200, json.dumps({"vpn": vpn_ok, "ip": VPN_IP,
                                         "torrents": snapshot(),
-                                        "usenet": usenet_snapshot()}),
+                                        "usenet": usenet_snapshot(),
+                                        "direct": fetcher.snapshot() if fetcher else []}),
                        "application/json")
         elif path == "/search":
             qs = parse_qs(urlparse(self.path).query)
@@ -3075,8 +3210,20 @@ class H(BaseHTTPRequestHandler):
             magnet = (data.get("magnet") or [""])[0].strip()
             turl = (data.get("torrent_url") or [""])[0].strip()
             nzb = (data.get("nzb_id") or [""])[0].strip()
+            durl = (data.get("url") or [""])[0].strip()
             cat = (data.get("cat") or ["other"])[0].strip()
-            if magnet.startswith("magnet:"):
+            if durl and not (magnet or turl or nzb):
+                # a plain file URL (open directory, archive mirror): the direct-download engine
+                if fetcher is None:
+                    self._send(501, "direct downloads unavailable"); return
+                try:
+                    fetcher.add(durl, cat, (data.get("name") or [""])[0].strip() or None)
+                    self._send(200, "ok")
+                except ValueError as e:
+                    self._send(400, "cannot download that URL: %s" % e)
+                except Exception as e:
+                    self._send(502, "direct download failed (%s)" % str(e)[:120])
+            elif magnet.startswith("magnet:"):
                 try:
                     add_magnet(magnet, cat)
                     self._send(200, "ok")
@@ -3197,6 +3344,13 @@ class H(BaseHTTPRequestHandler):
             dele = (qs.get("delete") or ["0"])[0] == "1"
             self._send(200, json.dumps({"ok": usenet_remove(nid, dele)}),
                        "application/json")
+        elif path == "/direct/remove":
+            # cancel / forget a direct download (optionally deleting its file)
+            qs = parse_qs(urlparse(self.path).query)
+            did = (qs.get("id") or [""])[0]
+            dele = (qs.get("delete") or ["0"])[0] == "1"
+            ok = bool(fetcher and re.fullmatch(r"d-[0-9a-f]+-[0-9a-f]+", did or "") and fetcher.remove(did, dele))
+            self._send(200, json.dumps({"ok": ok}), "application/json")
         elif path == "/pause":
             pause(self._ih())
             self._send(200, "ok")
@@ -3264,6 +3418,9 @@ class H(BaseHTTPRequestHandler):
                 elif path == "/hunt/delete":
                     self._send(200, json.dumps({"ok": hunt.delete_hunt(data.get("id", ""))}),
                                "application/json")
+                elif path == "/hunt/update":
+                    self._send(200, json.dumps({"ok": hunt.update_hunt(data.get("id", ""), data)}),
+                               "application/json")
                 else:
                     self._send(404, "not found")
             except Exception as e:
@@ -3304,6 +3461,13 @@ if __name__ == "__main__":
     _cfg_dir = os.path.dirname(PW_FILE) or "/config"
     threading.Thread(target=library.start, args=(SAVE, _cfg_dir, TMDB_API_KEY),
                      daemon=True).start()
+    if fetcher is not None:
+        # direct file downloads (open dirs / archives) into the same category folders; the
+        # workers only pull from the queue while the live VPN flag says the tunnel is up
+        try:
+            fetcher.start(SAVE, FOLDERS, vpn_check=lambda: bool(vpn_ok))
+        except Exception as e:
+            print(f"[vpntorrent] direct-download engine failed to start: {e}", flush=True)
     if hunt is not None:
         # Inject the LLM brain (Phase 2). The brain itself checks whether AI is on and
         # falls back to hunt's deterministic stub when it isn't, so this is safe to wire
@@ -3311,7 +3475,10 @@ if __name__ == "__main__":
         # backend stays stubbed until Phase 3.
         if hunt_brain is not None:
             try:
-                hunt.set_backends(generate=hunt_brain.generate, judge=hunt_brain.judge)
+                hunt.set_backends(generate=hunt_brain.generate, judge=hunt_brain.judge,
+                                  profile=hunt_brain.build_profile,
+                                  profile_min=hunt_brain.minimal_profile,
+                                  reflect=hunt_brain.reflect)
             except Exception:
                 pass
         if hunt_exec is not None:

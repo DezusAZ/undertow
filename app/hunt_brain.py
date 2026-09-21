@@ -21,6 +21,15 @@ import threading
 import ai
 import hunt
 
+try:                                   # Brain v2 layers (profile / planner / judge / journal).
+    from brain import profile as _profile   # Optional so the runtime still imports without them.
+    from brain import judge as _judge_v2
+    from brain import planner as _planner
+    from brain import journal as _journal
+    from brain import llm as _llm
+except Exception:                      # pragma: no cover
+    _profile = _judge_v2 = _planner = _journal = _llm = None
+
 # Only ever run a bounded number of LLM calls at once ACROSS ALL HUNTS. On a GPU this
 # just serialises cheap calls; on a CPU-bound model it is what stops N concurrent hunts
 # from pegging every core at the same time. Tunable for a beefier box.
@@ -117,11 +126,16 @@ def brain_status():
             last = int(time.time() - _last_llm_ts)
     except Exception:
         pass
+    roles = {}
+    try:
+        roles = _llm.stats() if _llm is not None else {}
+    except Exception:
+        pass
     return {"using_llm": using, "reason": reason, "ai_enabled": enabled, "reachable": reachable,
             "gpu_ok": gpu, "box_busy": busy, "last_used_s": last,
             "llm_calls": st.get("calls", 0), "llm_ok": st.get("ok", 0),
             "llm_fail": st.get("fail", 0), "last_error": st.get("last_error", ""),
-            "last_latency_s": st.get("last_latency_s")}
+            "last_latency_s": st.get("last_latency_s"), "roles": roles}
 
 # How many fresh strategies to ask for per diverge call, and how much memory to show
 # the model (bounded so the prompt can't grow without limit over a weeks-long hunt).
@@ -264,26 +278,58 @@ def _parse_strategies(txt):
     return _clean_strategies(_salvage(txt))
 
 
+def reflect(h):
+    """L7 backend for hunt.set_backends(reflect=...): every few cycles, let the model update
+    the hunt's journal + profile. Returns True when something was written."""
+    if _journal is None or not _use_llm() or not _journal.due(h):
+        return False
+    p = h.get("profile")
+    if not p:
+        return False
+    out = _journal.reflect(h, p)
+    if out is None:
+        return False
+    _mark_llm()
+    hunt._event(h, kind="reflect", direction=out.get("direction", ""),
+                note=str(out.get("note") or "")[:160],
+                facts=len(out.get("facts_add") or []), dead_ends=len(out.get("dead_ends_add") or []))
+    return True
+
+
 def generate(h):
     """DIVERGE: new strategies from the local LLM; deterministic stub if AI unavailable
-    OR the box is too busy to spend cycles on the model."""
+    OR the box is too busy to spend cycles on the model. Brain v2 (source-aimed planner
+    over profile + journal + yields) when a profile exists; the v1 prompt otherwise."""
     if not _use_llm():
         return hunt._stub_generate(h)
+    p = h.get("profile") or {}
+    if _planner is not None and p.get("built_by") == "llm":
+        jtxt = _journal.render(h.get("journal")) if _journal is not None else ""
+        out = _planner.plan(h, p, jtxt)
+        if out:
+            _mark_llm()
+            return out
+        # planner gave nothing usable -> fall through to the v1 prompt (still the model)
     tried = [k.split("|", 1)[-1] for k in h.get("_tried_keys", [])][-_SHOW_TRIED:]
     # also fold in what's already queued so we don't re-propose it
     tried += [s.get("query", "") for s in h.get("frontier", [])][:_SHOW_TRIED]
     leads = [s.get("query", "") for s in h.get("tried_recent", [])][:_SHOW_LEADS]
+    # The target PROFILE (L1) anchors the planner when we have one: aliases, creators,
+    # identifiers and the near-misses give the model real material to vary on.
+    p = h.get("profile") or {}
+    if _profile is not None and p.get("built_by") == "llm":
+        head = "TARGET PROFILE:\n%s\n" % _profile.render(p, 1100)
+    else:
+        head = ("GOAL: %s\nCATEGORY: %s\nWHAT SUCCESS LOOKS LIKE: %s\n"
+                % (h.get("goal", ""), h.get("category", "all"),
+                   (h.get("description") or "(not specified)")[:400]))
     user = (
-        "GOAL: %s\n"
-        "CATEGORY: %s\n"
-        "WHAT SUCCESS LOOKS LIKE: %s\n"
+        head +
         "ALREADY TRIED (do NOT repeat or reword): %s\n"
         "RECENT ANGLES: %s\n"
         "Propose %d NEW strategies most likely to surface the target, favoring the "
         "obscure/non-surface angles. Vary the methods (%s)."
-        % (h.get("goal", ""), h.get("category", "all"),
-           (h.get("description") or "(not specified)")[:400],
-           json.dumps(tried[-_SHOW_TRIED:], ensure_ascii=False)[:1600],
+        % (json.dumps(tried[-_SHOW_TRIED:], ensure_ascii=False)[:1600],
            json.dumps(leads, ensure_ascii=False)[:600],
            _N_NEW, _METHODS))
     # num_predict cap keeps a slow local model from decoding until the socket times out.
@@ -299,12 +345,39 @@ def generate(h):
     return _parse_strategies(txt) or hunt._stub_generate(h)
 
 
+def build_profile(goal, category, description):
+    """L1 backend for hunt.set_backends(profile=...): the model's TARGET PROFILE, or None
+    (AI off / GPU gate closed / model unavailable) — the runtime then keeps the minimal one."""
+    if _profile is None or not _use_llm():
+        return None
+    p = _profile.build(goal, category, description)
+    if p:
+        _mark_llm()
+    return p
+
+
+def minimal_profile(goal, category, description):
+    if _profile is None:
+        return None
+    return _profile.minimal(goal, category, description)
+
+
 def judge(strategy, results, h):
-    """CONVERGE: pick real matches + pull leads. Falls back to accept-all (stub)."""
+    """CONVERGE: pick real matches + pull leads. Brain v2 (structured rows + profile + per-row
+    verdicts) when the model is available; the deterministic relevance gate otherwise."""
     results = list(results or [])
     if not results:
         return [], []
     if not _use_llm():
+        return hunt._stub_judge(strategy, results, h)
+    if _judge_v2 is not None:
+        p = h.get("profile") or (_profile.minimal(h.get("goal", ""), h.get("category", ""),
+                                                  h.get("description", "")) if _profile else {})
+        out = _judge_v2.judge(strategy, results, h, p)
+        if out is not None:
+            _mark_llm()
+            return out
+        # the model gave nothing usable (unreachable / bad JSON) -> deterministic gate
         return hunt._stub_judge(strategy, results, h)
     shown = results[:_SHOW_RESULTS]
     listing = "\n".join("%d. %s" % (i, (r.get("title") or "")[:160])

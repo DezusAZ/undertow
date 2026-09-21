@@ -177,14 +177,46 @@ def _run_pivot(q, category, h=None):
     return [_norm_file_hit(f, category) for f in files[:200]]
 
 
+def _run_adapter(module, q, category):
+    """ONE named adapter, directly (Brain v2 source-aimed strategies). Bypasses the
+    category gating that hides most adapters from an "all" hunt."""
+    try:
+        import sources
+    except Exception:
+        return []
+    try:
+        with _EXEC_GATE:
+            out = sources.search_one(module, q, category if category in _CATS else "", timeout=15) or []
+    except Exception:
+        return []
+    return [r for r in out if isinstance(r, dict)]
+
+
 def execute(strategy, h):
-    """The injected hunt executor. Never raises; returns a list of result dicts."""
+    """The injected hunt executor. Never raises; returns a list of result dicts.
+
+    Brain v2 strategies carry a `source` (see brain/manifest.py) and are routed to exactly
+    that source; older/stub strategies only have a `method` and take the classic paths."""
     try:
         method = (strategy.get("method") or "search").lower()
         q = (strategy.get("query") or "").strip()
         if not q:
             return []
         category = (h.get("category") or "all").lower()
+        source = (strategy.get("source") or "").lower()
+        if source and source != "all":
+            try:
+                from brain import manifest
+                r = manifest.route(source)
+            except Exception:
+                r = ("meta", None)
+            if r[0] == "adapter":
+                return _run_adapter(r[1], q, category)
+            if r[0] == "dork":
+                return _run_dork(q, category, h)
+            if r[0] == "crawl":
+                return _run_pivot(q, category, h)
+            return _run_search(q, r[1] or category, h, strategy)
         if method == "academic":
             return _run_search(q, "documents", h, strategy)
         if method == "pivot":

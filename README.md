@@ -98,12 +98,42 @@ they fail.
 - Or paste a `magnet:` link directly.
 - Downloads land in `<MEDIA_PATH>/<category>/` — `MEDIA_PATH` is whatever you chose at
   install time (it's in your `.env`).
-- **Deep Hunt** runs a long, patient crawl for hard-to-find things, optionally guided by
-  a local LLM. It can keep watching and re-sweeping on a schedule, and notify you when
-  something appears.
+- **Deep Hunt** is a persistent search agent for hard-to-find things. Give it a target and,
+  in your own words, what counts as *found*; it grinds in the background for as long as you
+  let it. With a local LLM (see below) it first works out what the target actually *is*
+  (aliases, creators, identifiers, near-misses to reject), aims each search at a specific
+  source (trackers, DHT, Internet Archive, academic/open repositories, open directories,
+  a crawl of a promising folder…), judges every result with a stated reason, keeps a
+  journal of what it learned, and re-plans every few cycles. The card shows what it is
+  doing right now and why, per-source yields, the journal, and an activity log; results
+  carry the AI's verdict and reason. It can keep watching and re-sweeping on a schedule,
+  and notify you when something appears. Without AI it still runs, in a basic mode.
+- **Direct downloads.** A result that is a plain file URL (an open-directory listing, an
+  archive.org file, a mirror) gets a ⬇ Download too: it streams through the VPN into the
+  same category folder, resumes if interrupted, and is scanned like everything else.
+  Only http(s) to public hosts, with a size cap; web pages stay links.
 - **Library tab** — poster grid of finished downloads (add a TMDB key for art). Play in
   the browser, or hand the file to VLC/Infuse on your own device via a short-lived signed
   link scoped to that one file.
+
+### Local AI (optional)
+
+Point `OLLAMA_URL` in `.env` at a machine running [Ollama](https://ollama.com) and switch
+it on in **Engines → Local AI**. Everything stays on your network — nothing is sent to any
+cloud service. It powers the Deep Hunt brain, plain-English search and result explanations.
+
+Model choice matters more than you'd think: in our benchmark (labelled real search
+results) **`gemma4:12b`** judged with precision 1.00 / recall 0.93, while the 8–9B
+alternatives (`qwen3.5:9b`, `qwen3:8b`) scored recall 0.36 — they treat "4K preferred"
+as a hard requirement and reject what you asked for. Gemma 4 12B needs ~8 GB of VRAM.
+The app only ever runs the model on a GPU: if the watchdog can't confirm one, the hunt
+falls back to basic mode rather than pegging your CPU. The Engines panel shows the
+Ollama version, whether the chosen model is installed, and a live count of answered vs
+failed calls, so "AI active" is never a guess.
+
+To measure a model or prompt change yourself: `docker exec vpntorrent python3 -m
+eval.judge_lab <model>` (minutes) and `python3 -m eval.run --target all` (a full
+benchmark hunt per target). See `app/eval/`.
 
 ### Login
 
@@ -139,6 +169,10 @@ Four independent layers, so no single failure exposes you:
    `iptables -P OUTPUT DROP` and allows only loopback, the LAN, the VPN server's
    endpoint IP, and the `wg` interface. IPv6 is dropped outright. This is armed *first*,
    so there is no window at startup — and it holds during every reconnect and failover.
+   Policy routing then sends *everything* into the tunnel, with exactly one exception:
+   the local-AI (Ollama) host from `OLLAMA_URL`, as a single `/32`, and only if it is a
+   private address. Every other LAN host is still routed into the tunnel (where it goes
+   nowhere), and `verify-anonymity.sh` checks that this is the only exception.
 2. **Socket binding.** The torrent engine binds its listen and outgoing sockets to the
    VPN IP. If the tunnel goes, the address goes, and it has nothing to send from.
 3. **Shared network namespace.** Jackett, FlareSolverr, SearXNG, Bitmagnet and SABnzbd

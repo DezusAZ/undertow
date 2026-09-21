@@ -29,6 +29,12 @@ SWEEPS = {"off": 0, "6h": 21600, "daily": 86400, "weekly": 604800}
 _MAX_RESULTS = 5000            # cap the accumulating store so a hunt can't grow forever
 _MAX_TRIED = 20000
 _MAX_FRONTIER = 2000
+# The brain plans PROACTIVELY, not only when the frontier runs dry: judge leads and crawl
+# pivots kept the frontier non-empty forever, so the planner (the part that actually reads the
+# profile, journal and yields) never ran — the hunt just chased its own leads. Replenish when
+# the queue is short OR every few cycles regardless.
+_MIN_FRONTIER = 4
+_PLAN_EVERY = 4
 
 # A hunt is a POLITE background citizen. If the box is under heavy load — e.g. the
 # local LLM fell back to CPU and is pegging every core, or other containers are busy —
@@ -56,11 +62,34 @@ def box_busy():
 # CPU-pacing threshold left it perpetually switched off on a busy multi-container box (the "AI
 # never uses the GPU" symptom). Use a much higher bar: only refuse the GPU model under genuine
 # whole-box saturation.
-_LLM_BUSY_LOAD = float(os.environ.get("HUNT_LLM_BUSY_LOAD", "2.5"))
+_LLM_BUSY_LOAD = float(os.environ.get("HUNT_LLM_BUSY_LOAD", "4.0"))
+_LLM_BUSY_PSI = float(os.environ.get("HUNT_LLM_BUSY_PSI", "75"))    # % of the last 10 s stalled
+
+
+def _cpu_pressure():
+    """Kernel PSI: share of the last 10 s in which SOME task was stalled waiting for CPU
+    (0-100), or None if unavailable. Unlike the load average it is not inflated by a
+    permanently busy neighbour (an emulator pinning two cores reads as load 2+ forever
+    but as near-zero pressure when the other cores are free)."""
+    try:
+        with open("/proc/pressure/cpu") as f:
+            for line in f:
+                if line.startswith("some"):
+                    m = re.search(r"avg10=([0-9.]+)", line)
+                    if m:
+                        return float(m.group(1))
+    except Exception:
+        pass
+    return None
 
 
 def _box_overloaded():
-    """True only under EXTREME load — the (GPU-bound) hunt LLM eases off just short of a meltdown."""
+    """True only under GENUINE saturation — the (GPU-bound) hunt LLM eases off just short of a
+    meltdown. Load average alone was the wrong signal on this box: another container's
+    emulator kept it at 2.5/core around the clock and the AI stayed silently switched off."""
+    psi = _cpu_pressure()
+    if psi is not None:
+        return psi >= _LLM_BUSY_PSI
     return load_per_core() >= _LLM_BUSY_LOAD
 
 _reg_lock = threading.Lock()
@@ -75,10 +104,20 @@ _execute_fn = None
 _judge_fn = None
 _verify_fn = None      # optional: (matches) -> matches with dead results dropped + _live tagged
 _notify_fn = None      # optional: (hunt, new_count, new_titles) -> push a notification
+_profile_fn = None     # optional: (goal, category, description) -> TARGET PROFILE dict or None
+_profile_min = None    # optional: (goal, category, description) -> the no-model profile shape
+_reflect_fn = None     # optional: (hunt) -> True if it updated journal/profile (called each cycle)
+
+_EVENTS_KEEP = 80      # per-hunt activity log (ring buffer) for the live view
+_PROFILE_RETRY_S = 1800
 
 
-def set_backends(generate=None, execute=None, judge=None, verify=None, notify=None):
-    global _generate_fn, _execute_fn, _judge_fn, _verify_fn, _notify_fn
+def set_backends(generate=None, execute=None, judge=None, verify=None, notify=None,
+                 profile=None, profile_min=None, reflect=None):
+    global _generate_fn, _execute_fn, _judge_fn, _verify_fn, _notify_fn, _profile_fn, _profile_min
+    global _reflect_fn
+    if reflect is not None:
+        _reflect_fn = reflect
     if generate is not None:
         _generate_fn = generate
     if execute is not None:
@@ -89,6 +128,52 @@ def set_backends(generate=None, execute=None, judge=None, verify=None, notify=No
         _verify_fn = verify
     if notify is not None:
         _notify_fn = notify
+    if profile is not None:
+        _profile_fn = profile
+    if profile_min is not None:
+        _profile_min = profile_min
+
+
+def _event(h, **kv):
+    """Append to the hunt's activity log (bounded). Never raises."""
+    try:
+        kv["ts"] = int(time.time())
+        ev = h.setdefault("events", [])
+        ev.append(kv)
+        if len(ev) > _EVENTS_KEEP:
+            del ev[:len(ev) - _EVENTS_KEEP]
+    except Exception:
+        pass
+
+
+def _ensure_profile(h):
+    """L1: make sure the hunt has a TARGET PROFILE. The model builds it (once, in the worker —
+    never on the HTTP request); until it can, a minimal profile of the user's own words is
+    used so every prompt/renderer sees the same shape. Retried on a long cadence so a hunt
+    created while AI was asleep still gets a real profile later."""
+    p = h.get("profile")
+    if p and p.get("built_by") == "llm":
+        return p
+    now = time.time()
+    if not p and _profile_min:
+        try:
+            h["profile"] = p = _profile_min(h.get("goal", ""), h.get("category", ""),
+                                            h.get("description", ""))
+        except Exception:
+            pass
+    if _profile_fn and now - float(h.get("_profile_attempt", 0)) >= _PROFILE_RETRY_S:
+        h["_profile_attempt"] = now
+        try:
+            built = _profile_fn(h.get("goal", ""), h.get("category", ""), h.get("description", ""))
+        except Exception:
+            built = None
+        if built:
+            h["profile"] = built
+            _event(h, kind="profile", title=built.get("canonical_title", ""),
+                   aliases=len(built.get("aliases", [])), conf=built.get("knowledge_confidence"))
+            return built
+        _event(h, kind="profile-unavailable")
+    return h.get("profile")
 
 
 def _notify(h, new_count, new_titles):
@@ -168,8 +253,18 @@ def _save(h):
 
 
 def _strat_key(s):
+    # source-aimed (Brain v2) strategies key on the source too: the same words sent to
+    # archive.org and to the trackers are two different strategies.
+    src = str(s.get("source", "") or "").lower().strip()
     return (str(s.get("method", "")).lower().strip() + "|"
+            + ((src + "|") if src and src != "all" else "")
             + re.sub(r"\s+", " ", str(s.get("query", "")).lower().strip()))
+
+
+def _lane(s):
+    """The bandit arm a strategy belongs to: its source when aimed, else its method."""
+    src = str(s.get("source", "") or "").lower().strip()
+    return src if src and src != "all" else str(s.get("method", "search")).lower()
 
 
 def _result_key(r):
@@ -358,8 +453,13 @@ def _add_strategies(h, strategies):
             sc = max(0.0, min(1.0, float(s.get("score"))))
         except (TypeError, ValueError):
             sc = 0.5                       # unscored -> neutral
-        s = {"method": s.get("method", "search"), "query": str(s["query"])[:300],
-             "why": str(s.get("why", ""))[:200], "score": sc}
+        item = {"method": s.get("method", "search"), "query": str(s["query"])[:300],
+                "why": str(s.get("why", ""))[:200], "score": sc}
+        if s.get("source"):
+            item["source"] = str(s["source"])[:40]
+        if s.get("mode"):
+            item["mode"] = str(s["mode"])[:12]
+        s = item
         k = _strat_key(s)
         if k in have:
             continue
@@ -374,7 +474,7 @@ def _add_strategies(h, strategies):
 def _affinity(h, method):
     """How productive a method/source has been THIS hunt — a smoothed expected yield per
     try (Beta(1,1) prior), squashed into a multiplier. Unknown method => willing-to-try."""
-    ms = h.get("method_stats", {}).get(method)
+    ms = h.get("source_stats", {}).get(method) or h.get("method_stats", {}).get(method)
     if not ms:
         return 0.9
     tries = ms.get("tries", 0)
@@ -395,31 +495,38 @@ def _pop_best(h, explore=False):
     fr = h.get("frontier") or []
     if not fr:
         return None
-    ms = h.get("method_stats", {})
+    ms = dict(h.get("method_stats", {}))
+    ms.update(h.get("source_stats", {}))            # aimed strategies are their own arms
     if explore:
         best_i, best_key = 0, None
         for i, s in enumerate(fr):
-            t = ms.get(s.get("method", "search"), {}).get("tries", 0)
+            t = ms.get(_lane(s), {}).get("tries", 0)
             key = (t, -float(s.get("score", 0.5)))  # fewest tries, then best score
             if best_key is None or key < best_key:
                 best_key, best_i = key, i
         return fr.pop(best_i)
     best_i, best_v = 0, -1.0
     for i, s in enumerate(fr):
-        method = s.get("method", "search")
+        method = _lane(s)
         tries = ms.get(method, {}).get("tries", 0)
-        novelty = 1.0 / (1.0 + tries)               # untried methods get explored
+        novelty = 1.0 / (1.0 + tries)               # untried methods/sources get explored
         v = float(s.get("score", 0.5)) * _affinity(h, method) * (1.0 + 0.4 * novelty)
         if v > best_v:
             best_v, best_i = v, i
     return fr.pop(best_i)
 
 
-def _note_method(h, method, new_found):
-    """Adapt the source-affinity: record a try for this method + how much it found."""
+def _note_method(h, method, new_found, source=None):
+    """Adapt the affinities: record a try for this method (and, for an aimed strategy, its
+    source) + how much it found."""
     ms = h.setdefault("method_stats", {}).setdefault(method, {"tries": 0, "found": 0})
     ms["tries"] += 1
     ms["found"] += max(0, int(new_found))
+    src = (source or "").lower()
+    if src and src != "all":
+        ss = h.setdefault("source_stats", {}).setdefault(src, {"tries": 0, "found": 0})
+        ss["tries"] += 1
+        ss["found"] += max(0, int(new_found))
 
 
 def _requeue(h, strategy):
@@ -438,6 +545,28 @@ def _requeue(h, strategy):
             fr.insert(0, strategy)          # retry it first, next cycle (after a pace nap)
     except Exception:
         pass
+
+
+def _replenish(h):
+    """Let the brain plan when the frontier is short or on the periodic cadence (once per
+    cycle at most). Returns how many strategies were added. Used by the worker and by the
+    eval harness so both run the same loop."""
+    st = h.setdefault("stats", {})
+    c = int(st.get("cycles", 0))
+    if h.get("_planned_at") == c:
+        return 0
+    fr = h.get("frontier") or []
+    if fr and len(fr) >= _MIN_FRONTIER and (c == 0 or c % _PLAN_EVERY != 0):
+        return 0
+    if len(h.get("results", [])) >= _MAX_RESULTS:
+        return 0
+    h["_planned_at"] = c
+    new = _gen(h)
+    added = _add_strategies(h, new) if new else 0
+    if added:
+        _event(h, kind="plan", added=added,
+               sources=sorted({str(s.get("source") or s.get("method") or "") for s in new})[:8])
+    return added
 
 
 def _resweep(h):
@@ -500,6 +629,11 @@ def _worker(hid, stop, mygen):
             break
         pace = max(3, int(h.get("pace_seconds", 20)))
         try:
+            if (h.get("profile") or {}).get("built_by") != "llm":
+                _ensure_profile(h)               # L1 first: everything downstream reads it
+                _save(h)
+            if h["frontier"] and _replenish(h):  # L3: keep the brain steering, not just idling
+                _save(h)
             if not h["frontier"]:
                 now_ts = int(time.time())
                 sweep_s = h.get("sweep_seconds", 0)
@@ -576,12 +710,24 @@ def _worker(hid, stop, mygen):
             st["found"] = len(h["results"])
             st["new_last"] = len(h["results"]) - before
             st["last"] = int(time.time())
-            _note_method(h, strategy.get("method", "search"), st["new_last"])  # adapt affinity
+            _note_method(h, strategy.get("method", "search"), st["new_last"],
+                         source=strategy.get("source"))                       # adapt affinity
+            _event(h, kind="cycle", method=strategy.get("method", "search"),
+                   source=strategy.get("source", ""), query=strategy.get("query", "")[:120],
+                   why=strategy.get("why", "")[:120], results=len(results), kept=len(matches),
+                   new=st["new_last"], leads=len(leads or []))
             if st["new_last"] > 0:              # tell the user their background hunt found something
                 _notify(h, st["new_last"], [r.get("title", "") for r in h["results"][before:]])
             _save(h)
+            if _reflect_fn is not None:         # L7: every few cycles, update the journal/profile
+                try:
+                    if _reflect_fn(h):
+                        _save(h)
+                except Exception:
+                    pass
         except Exception as e:
             h.setdefault("stats", {})["last_error"] = str(e)[:200]
+            _event(h, kind="error", error=str(e)[:160])
             _save(h)
         # polite pacing: nap the normal interval, but 4x longer if the box is under
         # heavy load, so a background hunt can never hog the machine.
@@ -680,6 +826,40 @@ def resume_hunt(hid):
     return True                          # gen bump makes any stale/alive worker exit
 
 
+def update_hunt(hid, patch):
+    """Live controls: pace, watch/sweep, description (re-profiles), and 'kick' (drop the idle
+    backoff + re-seed so the brain thinks again now). Returns True if the hunt exists."""
+    with _reg_lock:
+        h = _hunts.get(hid)
+        if not h:
+            return False
+        patch = patch or {}
+        if patch.get("pace") in PACES:
+            h["pace"] = patch["pace"]
+            h["pace_seconds"] = PACES[patch["pace"]]
+        if "watch" in patch or "sweep" in patch:
+            sweep = patch.get("sweep", h.get("sweep", "daily"))
+            sweep = sweep if sweep in SWEEPS else "daily"
+            watch = bool(patch.get("watch", h.get("watch"))) and SWEEPS.get(sweep, 0) > 0
+            h["watch"] = watch
+            h["sweep"] = sweep if watch else "off"
+            h["sweep_seconds"] = SWEEPS.get(sweep, 0) if watch else 0
+        if "description" in patch:
+            h["description"] = str(patch.get("description") or "")[:500]
+            p = h.get("profile")
+            if p:                                   # the user's words are authoritative
+                p["user_description"] = h["description"]
+                p["success_criteria"] = h["description"] or p.get("success_criteria", "")
+        if patch.get("kick"):
+            _add_strategies(h, _stub_generate(h))
+            h["_kick"] = int(time.time())
+            _event(h, kind="kick")
+        _save(h)
+    if patch.get("kick") and h.get("status") != "stopped":
+        _start_thread(hid)                          # a fresh worker skips any idle backoff
+    return True
+
+
 def delete_hunt(hid):
     # Validate BEFORE touching anything: the id comes from a request body, and this
     # function removes a file by it.
@@ -711,6 +891,10 @@ def _public(h):
         "tried_recent": h.get("tried_recent", [])[:12],
         "result_count": len(h.get("results", [])),
         "method_stats": h.get("method_stats", {}),   # which sources are producing
+        "profile": h.get("profile"),                  # L1 target profile (None until built)
+        "journal": h.get("journal"),                  # L6 memory (None until the first reflect)
+        "source_stats": h.get("source_stats", {}),    # per-source yield (aimed strategies)
+        "events": h.get("events", [])[-25:],          # activity log for the live view
     }
 
 
@@ -760,6 +944,7 @@ def resume_all():
         h.setdefault("stats", {})
         h.setdefault("method_stats", {})
         h.setdefault("watch", False)
+        h.setdefault("events", [])
         h.setdefault("sweep_seconds", 0)
         h.setdefault("last_sweep", h.get("created", 0))
         h.setdefault("pace_seconds", PACES.get(h.get("pace", "normal"), 20))
