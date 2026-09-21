@@ -7,7 +7,8 @@ adapter, this is OUR node: no Cloudflare wall, and its crawl traffic exits throu
 same Proton tunnel. NOTE: the DB warms up over hours/days, so results are sparse until
 it has crawled for a while.
 
-stdlib only; never raises (returns [] on any error).
+stdlib only. Raises on a transport error/timeout (the registry's breaker needs to see it);
+returns [] for a healthy empty answer.
 """
 import os
 import re
@@ -101,18 +102,32 @@ def _parse(raw):
     return out
 
 
+# Torznab category ids bitmagnet understands, so a scoped search doesn't return off-type
+# releases (a music search used to leak videos into the music view).
+_TORZNAB_CAT = {"movies": "2000", "tv": "5000", "music": "3000",
+                "documents": "7000", "software": "4000"}
+# bitmagnet's Postgres full-text search is query-dependent: some queries answer in 20 ms,
+# others hang 15-20 s. Every search AND every hunt cycle paid the full fan-out timeout for
+# it, so its budget is capped independently of the caller's. A timeout/error is RAISED
+# (not swallowed as "no results") so the registry's circuit breaker actually counts it.
+_MAX_TIMEOUT = float(os.environ.get("BITMAGNET_TIMEOUT", "5"))
+
+
 def search(query, category="", timeout=12):
     q = (query or "").strip()
     if not q:
         return []
-    url = (BITMAGNET_URL.rstrip("/") + "/torznab/api?"
-           + urllib.parse.urlencode({"t": "search", "q": q}))
+    params = {"t": "search", "q": q, "limit": "40"}
+    cat = _TORZNAB_CAT.get((category or "").lower())
+    if cat:
+        params["cat"] = cat
+    url = BITMAGNET_URL.rstrip("/") + "/torznab/api?" + urllib.parse.urlencode(params)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=min(timeout, _MAX_TIMEOUT)) as resp:
             raw = resp.read(_READ_CAP)
-    except Exception:
-        return []
+    except Exception as e:
+        raise RuntimeError("bitmagnet: %s" % (str(e)[:80] or type(e).__name__))
     return _parse(raw)[:40]
 
 

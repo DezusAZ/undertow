@@ -84,7 +84,10 @@ def _mark_llm():
 
 def brain_status():
     """What the hunt's AI brain is doing, for the UI to show. reason: active | ai-off |
-    gpu-not-ready | box-busy — so the user can SEE whether the local LLM is running and, if not, why."""
+    unreachable | gpu-not-ready | box-busy | failing — so the user can SEE whether the local LLM
+    is running and, if not, why. HONEST: "active" requires the server to be reachable AND the
+    last call to have succeeded — the gate alone (which only looks at the GPU flag) claimed
+    "active" for 32 days while every call was silently timing out."""
     try:
         enabled = bool(ai.is_enabled())
     except Exception:
@@ -94,17 +97,31 @@ def brain_status():
         busy = bool(hunt._box_overloaded())
     except Exception:
         busy = False
-    using = enabled and gpu and not busy
-    reason = ("active" if using else "ai-off" if not enabled
-              else "gpu-not-ready" if not gpu else "box-busy" if busy else "off")
+    try:
+        reachable = bool(ai.reachable_cached()) if enabled else False
+    except Exception:
+        reachable = False
+    try:
+        st = ai.stats()
+    except Exception:
+        st = {}
+    failing = bool(st.get("calls")) and st.get("last_fail_ts", 0) > st.get("last_ok_ts", 0)
+    gated = enabled and gpu and not busy
+    using = gated and reachable and not failing
+    reason = ("ai-off" if not enabled else "unreachable" if not reachable
+              else "gpu-not-ready" if not gpu else "box-busy" if busy
+              else "failing" if failing else "active")
     last = None
     try:
         if _last_llm_ts:
             last = int(time.time() - _last_llm_ts)
     except Exception:
         pass
-    return {"using_llm": using, "reason": reason, "ai_enabled": enabled,
-            "gpu_ok": gpu, "box_busy": busy, "last_used_s": last}
+    return {"using_llm": using, "reason": reason, "ai_enabled": enabled, "reachable": reachable,
+            "gpu_ok": gpu, "box_busy": busy, "last_used_s": last,
+            "llm_calls": st.get("calls", 0), "llm_ok": st.get("ok", 0),
+            "llm_fail": st.get("fail", 0), "last_error": st.get("last_error", ""),
+            "last_latency_s": st.get("last_latency_s")}
 
 # How many fresh strategies to ask for per diverge call, and how much memory to show
 # the model (bounded so the prompt can't grow without limit over a weeks-long hunt).
@@ -142,6 +159,38 @@ _DIVERGE_SYS = (
     "plain words and bare operators only (write  intitle:index of X  with no quotes).\n"
     'Reply with ONLY a JSON object: {"strategies":[{"method":"...","query":"...","score":0.7}]}'
 )
+
+# Server-side output schemas (Ollama `format`): the model is CONSTRAINED to this shape, so the
+# regex salvage below only matters on a server too old to honour schemas. `why` is required —
+# the old prompt asked for it but the example omitted it, so it never came back.
+_DIVERGE_SCHEMA = {
+    "type": "object",
+    "properties": {"strategies": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"method": {"type": "string", "enum": ["search", "dork", "academic", "pivot"]},
+                       "query": {"type": "string"}, "why": {"type": "string"},
+                       "score": {"type": "number"}},
+        "required": ["method", "query", "why", "score"]}}},
+    "required": ["strategies"],
+}
+_CONVERGE_SCHEMA = {
+    "type": "object",
+    "properties": {"matches": {"type": "array", "items": {"type": "integer"}},
+                   "leads": {"type": "array", "items": {
+                       "type": "object",
+                       "properties": {"method": {"type": "string"}, "query": {"type": "string"}},
+                       "required": ["method", "query"]}}},
+    "required": ["matches", "leads"],
+}
+
+
+def _think():
+    """think=False for thinking-family models on the hot path; None (omit) otherwise."""
+    try:
+        return False if ai.model_thinks() else None
+    except Exception:
+        return None
+
 
 _CONVERGE_SYS = (
     "You judge search results for a running hunt. You are given the goal and a numbered "
@@ -241,8 +290,8 @@ def generate(h):
     # ~380 tokens holds several compact (method,query) strategies; the timeout is generous
     # because this is a paced BACKGROUND agent — latency doesn't matter, completing does.
     with _LLM_GATE:                     # bounded concurrency across all hunts
-        txt = ai._chat(_DIVERGE_SYS, user, timeout=110, want_json=True,
-                       options=dict(_LLM_OPTS, num_predict=400, temperature=0.8))
+        txt = ai._chat(_DIVERGE_SYS, user, timeout=110, schema=_DIVERGE_SCHEMA, think=_think(),
+                       options=dict(_LLM_OPTS, num_predict=600, temperature=0.8))
     if txt:
         _mark_llm()                     # record a REAL model response (ai._chat returns "" on failure)
     # robust parse (salvages strategies even from slightly-broken/truncated JSON); if the
@@ -264,8 +313,8 @@ def judge(strategy, results, h):
             % (h.get("goal", ""), h.get("category", "all"),
                strategy.get("query", ""), listing))
     with _LLM_GATE:                     # bounded concurrency across all hunts
-        txt = ai._chat(_CONVERGE_SYS, user, timeout=100, want_json=True,
-                       options=dict(_LLM_OPTS, num_predict=384))
+        txt = ai._chat(_CONVERGE_SYS, user, timeout=100, schema=_CONVERGE_SCHEMA, think=_think(),
+                       options=dict(_LLM_OPTS, num_predict=384, temperature=0.0))
     if txt:
         _mark_llm()                     # record a REAL model response (ai._chat returns "" on failure)
     if not txt:

@@ -63,6 +63,7 @@ STATUS.md
 MIGRATION.md
 DEEP-HUNT-DESIGN.md
 DISCOVERY-DESIGN.md
+DEEP-HUNT-V2-PLAN.md
 mirror-to-drive.sh
 # packaged release artifacts (rebuild with package.sh; never ship a prebuilt blob
 # because it can silently carry the packager's own config into someone else's install)

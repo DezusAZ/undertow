@@ -334,7 +334,7 @@ def _dedup(rows, limit=25):
 
 
 def _search_marginalia(dork, timeout):
-    q = _uparse.quote(dork, safe="")
+    q = _uparse.quote(_plain_words(dork) or dork, safe="")
     url = "https://api.marginalia.nu/public/search/%s?count=25" % q
     txt = _get(url, timeout, accept="application/json")
     data = _json.loads(txt)
@@ -368,8 +368,23 @@ def _search_mojeek(dork, timeout):
     return rows
 
 
-_DDG_RE = _re.compile(r'class="result-link"\s+href="([^"]+)"[^>]*>(.*?)</a>',
-                      _re.I | _re.S)
+# DDG lite's markup has changed attribute order + quote style over time
+# (`<a rel="nofollow" href="…" class='result-link'>` today). Match the class anywhere in
+# the tag and the href anywhere else — the old fixed-order pattern parsed 0 of 10 live hits.
+_DDG_RE = _re.compile(
+    r'<a\b(?=[^>]*class=[\'"]result-link[\'"])[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+    _re.I | _re.S)
+
+# Marginalia indexes the small web beautifully but treats Google operators as literal
+# keywords (and hangs ~20 s on some of them). Feed it the plain words instead.
+_OPS_RE = _re.compile(r'-?(?:intitle|inurl|intext|site|filetype|ext):(?:\([^)]*\)|"[^"]*"|\S+)',
+                      _re.I)
+
+
+def _plain_words(dork):
+    s = _OPS_RE.sub(" ", dork or "")
+    s = s.replace('"', " ").replace("(", " ").replace(")", " ").replace("|", " ")
+    return _re.sub(r"\s+", " ", s).strip()
 
 
 def _search_ddg_lite(dork, timeout):
@@ -427,7 +442,7 @@ def _search_searxng(dork, timeout):
     return []
 
 
-# name -> callable, tried in TRANSPORTS priority order
+# name -> callable
 _BACKENDS = {
     "marginalia": _search_marginalia,
     "mojeek": _search_mojeek,
@@ -435,27 +450,41 @@ _BACKENDS = {
     "searxng": _search_searxng,
 }
 
+# The order that actually works from a VPN exit (live-tested 2026-09-20, which contradicted
+# the 2026-07 notes above): DDG lite answers with real results and honours operators;
+# Marginalia is fine on plain words; Mojeek is captcha-walled; the local SearXNG's engines
+# are all rate-limited at the shared exit IP. The TRANSPORTS `priority` field was inverted
+# (SearXNG first) and cost up to 5×timeout per dork before anything useful ran.
+_ORDER = ["ddg_lite", "marginalia", "searxng", "mojeek"]
+
+# Per-transport outcome of the LAST call, for the engine-status panel / hunt telemetry:
+# name -> {"ok": bool, "rows": n, "err": str, "ts": epoch}. Read-only for callers.
+LAST_TRANSPORT_STATUS = {}
+
 
 def transport_search(dork, timeout=12):
     """Query the best working transport for `dork`. NEVER raises.
 
-    Tries transports in TRANSPORTS priority order and returns the first
+    Tries transports in the empirically-working order and returns the first
     non-empty, de-duplicated result set as a list of
     ``{"url","title","snippet","transport"}`` dicts. Returns [] if every
     transport fails or yields nothing.
     """
     if not dork:
         return []
-    order = sorted(TRANSPORTS, key=lambda t: t.get("priority", 99))
-    for t in order:
-        fn = _BACKENDS.get(t.get("name"))
+    import time as _time
+    for name in _ORDER:
+        fn = _BACKENDS.get(name)
         if fn is None:
             continue
+        err = ""
         try:
             rows = fn(dork, timeout)
-        except Exception:
-            rows = []
+        except Exception as e:
+            rows, err = [], (str(e)[:80] or type(e).__name__)
         rows = _dedup(rows or [])
+        LAST_TRANSPORT_STATUS[name] = {"ok": not err, "rows": len(rows), "err": err,
+                                       "ts": int(_time.time())}
         if rows:
             return rows
     return []

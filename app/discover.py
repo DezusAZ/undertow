@@ -30,6 +30,11 @@ import urllib.parse
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+try:                       # direct dork transports (DDG lite, Marginalia) — seeds when SearXNG is dry
+    from sources import _dorks
+except Exception:          # standalone import without the package on the path
+    _dorks = None
+
 SEARX_URL = os.environ.get("SEARX_URL", "http://127.0.0.1:8080")
 FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://127.0.0.1:8191")
 _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -52,6 +57,9 @@ _MAX_CANDIDATES = 90          # sibling/child dirs we probe per expansion round
 _SNOWBALL_HOSTS = 8          # hosts we re-dork (site:host) to find MORE open dirs
 _FETCH_TIMEOUT = 6
 _READ_CAP = 1_000_000
+
+# A query that already contains search operators is a ready-made dork (see open_dir_seeds).
+_HAS_OPS = re.compile(r'(?:\b(?:intitle|inurl|intext|site|filetype|ext):|"index of)', re.I)
 
 _DORKS_Q = [
     'intitle:"index of" {q}',
@@ -511,8 +519,14 @@ def open_dir_seeds(query, ext="", timeout=16):
         return []
     ext = (ext or "").strip().lstrip(".").lower()
     deadline = time.monotonic() + max(6, timeout)
-    dorks = [t.replace("{q}", q).replace("{ext}", ext)
-             for t in (_DORKS_QE if ext else _DORKS_Q)]
+    # A query that already carries operators (the hunt brain writes `intitle:index of X`)
+    # is a finished dork — run it as-is. Wrapping it in the templates again produced
+    # `intitle:"index of" intitle:index of X flac flac`, which matches nothing anywhere.
+    if _HAS_OPS.search(q):
+        dorks = [q]
+    else:
+        dorks = [t.replace("{q}", q).replace("{ext}", ext)
+                 for t in (_DORKS_QE if ext else _DORKS_Q)]
     hits = []
     ex = ThreadPoolExecutor(max_workers=min(6, len(dorks)))
     try:
@@ -527,6 +541,19 @@ def open_dir_seeds(query, ext="", timeout=16):
             pass
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
+    # The local SearXNG node's engines are all rate-limited at the shared VPN exit IP (live:
+    # 0 results for every query). Fall through to the direct transports (DDG lite answers
+    # from here) so the hunt gets seeds at all. Bounded by the caller's deadline.
+    if not hits and _dorks is not None:
+        for d in dorks[:2]:
+            if time.monotonic() > deadline - 4:
+                break
+            try:
+                hits.extend(_dorks.transport_search(d, timeout=8) or [])
+            except Exception:
+                pass
+            if hits:
+                break
     roots, seen = [], set()
     for h in hits:
         r = _root_of(h.get("url", ""))

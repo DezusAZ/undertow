@@ -93,14 +93,41 @@ vpn_up() {
     # weeks of reconnects). Only add what isn't already there.
     iptables -C OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null \
         || iptables -I OUTPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-    for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8 100.64.0.0/10; do
-        case "$net" in 10.0.0.0/8) [ "${_ip%%.*}" = "10" ] && continue ;; esac
-        # same reasoning: `ip rule add` never dedupes, so check before adding
-        ip rule show 2>/dev/null | grep -q "to $net lookup main" \
-            || ip rule add to "$net" lookup main priority 1000 2>/dev/null || true
-    done
+    # The ONE routing exception the kill-switch makes: the local-AI (Ollama) host, as a /32,
+    # and only if it is a PRIVATE address. Everything else — including any other LAN host —
+    # keeps going into the tunnel. Priority MUST be below wg-quick's 999 catch-all
+    # (`not fwmark 0xca6c lookup 51820`): the old broad exceptions sat at 1000, were never
+    # consulted, and silently cut the app off from Ollama from 2026-08-19 on.
+    _ai=$(ai_host)
+    if [ -n "$_ai" ]; then
+        ip rule show 2>/dev/null | grep -q "to $_ai lookup main" \
+            || ip rule add to "$_ai/32" lookup main priority 990 2>/dev/null || true
+    fi
     printf '%s' "$_ip"
     return 0
+}
+
+# ai_host -> the IPv4 of the configured Ollama server (OLLAMA_URL env, else the URL saved
+# from the UI in /config/ai.json), or nothing. PRIVATE (RFC1918 / CGNAT) addresses only: a
+# public Ollama URL is deliberately NOT exempted — routing it around the VPN would hand that
+# host the operator's real IP. The app applies the same rule when the URL is changed live.
+ai_host() {
+    _u="${OLLAMA_URL:-}"
+    [ -n "$_u" ] || _u=$(python3 -c 'import json
+try: print(json.load(open("/config/ai.json")).get("url", ""))
+except Exception: print("")' 2>/dev/null)
+    [ -n "$_u" ] || return 0
+    python3 - "$_u" <<'PY' 2>/dev/null
+import sys, socket, ipaddress, urllib.parse
+try:
+    h = urllib.parse.urlsplit(sys.argv[1]).hostname or ""
+    ip = ipaddress.ip_address(socket.gethostbyname(h))
+    if (ip.version == 4 and not ip.is_loopback
+            and (ip.is_private or ip in ipaddress.ip_network("100.64.0.0/10"))):
+        print(ip)
+except Exception:
+    pass
+PY
 }
 
 # tunnel_healthy -> 0 if wg is up, ROUTING internet traffic, and handshaking recently.
