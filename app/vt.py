@@ -1729,6 +1729,12 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 .lib-btn{background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);color:var(--text);font:inherit;font-size:14px;cursor:pointer;padding:11px 14px;white-space:nowrap;transition:.16s var(--ease)}
 .lib-btn:hover{background:var(--surface-2);border-color:var(--hair2)}
 .lib-count{color:var(--muted);font-size:13px;margin:0 0 14px 2px}
+.lib-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+.lib-tab{background:var(--surface);border:1px solid var(--hair);border-radius:var(--pill);color:var(--muted);font:inherit;font-size:13px;cursor:pointer;padding:7px 13px;white-space:nowrap;transition:.16s var(--ease);display:inline-flex;align-items:center;gap:6px}
+.lib-tab:hover{color:var(--text);border-color:var(--hair2)}
+.lib-tab.on{color:#04140b;background:linear-gradient(180deg,var(--green-b),var(--green));border-color:transparent;font-weight:600}
+.lib-tab .n{font-size:11px;opacity:.8;font-variant-numeric:tabular-nums}
+.lib-tab.on .n{opacity:.75}
 .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px}
 .lib-tile{background:var(--surface);border:1px solid var(--hair);border-radius:14px;overflow:hidden;cursor:pointer;position:relative;transition:transform .18s var(--ease),box-shadow .18s var(--ease),border-color .18s var(--ease)}
 .lib-tile:hover{transform:translateY(-3px);box-shadow:var(--sh);border-color:var(--hair2);z-index:2}
@@ -1890,6 +1896,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
     <input id="lq" class="lib-search" type="search" placeholder="Search your library…" oninput="libFilter()" autocomplete="off">
     <button class="lib-btn" onclick="loadLibrary()">↻ Refresh</button>
   </div>
+  <div id="libTabs" class="lib-tabs"></div>
   <div id="libSecBanner"></div>
   <p id="libCount" class="lib-count"></p>
   <div id="libGrid" class="lib-grid"></div>
@@ -2487,6 +2494,12 @@ function libPlaceholder(item){
   } else if (type === 'doc') {
     glyph = '<text x="150" y="245" font-family="system-ui,sans-serif" font-size="120" fill="rgba(255,255,255,.85)" text-anchor="middle">&#128196;</text>'
       + '<text x="150" y="330" font-family="system-ui,sans-serif" font-size="40" font-weight="700" fill="rgba(255,255,255,.9)" text-anchor="middle">' + libEsc(libInitials(title)) + '</text>';
+  } else if (type === 'book') {
+    glyph = '<text x="150" y="250" font-family="system-ui,sans-serif" font-size="120" fill="rgba(255,255,255,.9)" text-anchor="middle">&#128214;</text>'
+      + '<text x="150" y="335" font-family="system-ui,sans-serif" font-size="38" font-weight="700" fill="rgba(255,255,255,.9)" text-anchor="middle">' + libEsc(libInitials(title)) + '</text>';
+  } else if (type === 'photo') {
+    glyph = '<text x="150" y="250" font-family="system-ui,sans-serif" font-size="120" fill="rgba(255,255,255,.9)" text-anchor="middle">&#128247;</text>'
+      + '<text x="150" y="335" font-family="system-ui,sans-serif" font-size="38" font-weight="700" fill="rgba(255,255,255,.9)" text-anchor="middle">' + libEsc(libInitials(title)) + '</text>';
   } else {
     glyph = '<g transform="translate(150,196)">'
       + '<circle r="56" fill="rgba(0,0,0,.45)" stroke="rgba(255,255,255,.25)" stroke-width="2"/>'
@@ -2507,9 +2520,26 @@ function libPlaceholder(item){
 function libPosterSrc(item){
   return (item && item.poster) ? item.poster : libPlaceholder(item);
 }
+// A photo tile's thumbnail is the actual image streamed from disk; if it can't load (odd
+// format, gone), swap in the generated placeholder so we never show a broken-image icon.
+function libImgFallback(img, idx){
+  img.onerror = null;
+  var it = LIB_ITEMS[idx];
+  if (it) img.src = libPlaceholder(it);
+}
 
-var LIB_TYPE_LABELS = { movie:'Movie', tv:'TV', album:'Album', doc:'Doc', other:'Other' };
+var LIB_TYPE_LABELS = { movie:'Movie', tv:'TV', album:'Music', book:'Book', doc:'Document', photo:'Photo', other:'Other' };
 function libTypeLabel(t){ return LIB_TYPE_LABELS[t] || 'Other'; }
+// Filter tabs: label + the item .type it matches. 'all' is special (everything).
+var LIB_TABS = [['all','All'],['movie','Movies'],['tv','TV'],['album','Music'],
+                ['book','Books'],['doc','Documents'],['photo','Photos'],['other','Other']];
+var LIB_FILTER = 'all';
+try { LIB_FILTER = localStorage.getItem('vt_lib_filter') || 'all'; } catch(e) {}
+function libSetFilter(t){
+  LIB_FILTER = t;
+  try { localStorage.setItem('vt_lib_filter', t); } catch(e) {}
+  libRender();
+}
 
 function loadLibrary(){
   var grid = document.getElementById('libGrid');
@@ -2546,15 +2576,35 @@ function libRender(){
     return;
   }
 
-  var items = q ? LIB_ITEMS.filter(function(it){ return String(it.title || '').toLowerCase().indexOf(q) !== -1; }) : LIB_ITEMS;
+  // counts per type, for the tab badges (over everything, ignoring the current filter)
+  var counts = {};
+  for (var c = 0; c < LIB_ITEMS.length; c++) { var ty = LIB_ITEMS[c].type || 'other'; counts[ty] = (counts[ty] || 0) + 1; }
+  var tabsEl = document.getElementById('libTabs');
+  if (tabsEl) {
+    if (!counts[LIB_FILTER] && LIB_FILTER !== 'all') LIB_FILTER = 'all';   // active type emptied → All
+    var th = '';
+    for (var ti = 0; ti < LIB_TABS.length; ti++) {
+      var key = LIB_TABS[ti][0], lbl = LIB_TABS[ti][1];
+      var n = key === 'all' ? LIB_ITEMS.length : (counts[key] || 0);
+      if (key !== 'all' && !n) continue;                                    // hide empty types
+      th += '<button class="lib-tab' + (LIB_FILTER === key ? ' on' : '') + '" onclick="libSetFilter(\'' + key + '\')">'
+          + libEsc(lbl) + '<span class="n">' + n + '</span></button>';
+    }
+    tabsEl.innerHTML = th;
+  }
+
+  var items = LIB_ITEMS;
+  if (LIB_FILTER !== 'all') items = items.filter(function(it){ return (it.type || 'other') === LIB_FILTER; });
+  if (q) items = items.filter(function(it){ return String(it.title || '').toLowerCase().indexOf(q) !== -1; });
 
   if (count) {
-    count.textContent = items.length + (items.length === 1 ? ' item' : ' items')
+    var flabel = LIB_FILTER === 'all' ? '' : ' ' + libTypeLabel(LIB_FILTER);
+    count.textContent = items.length + flabel + (items.length === 1 ? ' item' : ' items')
       + (q ? ' matching “' + q + '”' : '');
   }
 
   if (!items.length) {
-    grid.innerHTML = '<div class="lib-empty">No titles match your search.</div>';
+    grid.innerHTML = '<div class="lib-empty">' + (q ? 'No titles match your search.' : 'Nothing in this category yet.') + '</div>';
     return;
   }
 
@@ -2573,11 +2623,14 @@ function libRender(){
     var type = it.type || 'other';
     var yr = it.year ? libEsc(it.year) : '';
     var shield = (it.scan === 'flagged') ? '<span class="lib-shield" title="Threat quarantined">⚠</span>' : '';
-    html += '<div class="lib-tile" onclick="libOpen(' + idx + ')">'
+    var full = (it.title || 'Untitled') + (yr ? ' (' + it.year + ')' : '');
+    var isImg = /^\/stream\?/.test(it.poster || '');
+    html += '<div class="lib-tile" title="' + libEsc(full) + '" onclick="libOpen(' + idx + ')">'
       + shield
-      + '<img class="lib-poster" loading="lazy" alt="" src="' + libEsc(libPosterSrc(it)) + '">'
+      + '<img class="lib-poster" loading="lazy" alt="" src="' + libEsc(libPosterSrc(it)) + '"'
+      + (isImg ? ' onerror="libImgFallback(this,' + idx + ')"' : '') + '>'
       + '<div class="lib-meta">'
-      + '<div class="lib-title">' + libEsc(it.title || 'Untitled') + '</div>'
+      + '<div class="lib-title" title="' + libEsc(full) + '">' + libEsc(it.title || 'Untitled') + '</div>'
       + '<div class="lib-sub">'
       + (yr ? '<span class="lib-year">' + yr + '</span>' : '')
       + '<span class="lib-badge t-' + libEsc(type) + '">' + libEsc(libTypeLabel(type)) + '</span>'

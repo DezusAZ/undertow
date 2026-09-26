@@ -34,8 +34,14 @@ VIDEO_EXTS = {".mp4", ".m4v", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
               ".ogv", ".mpg", ".mpeg", ".m2ts", ".ts", ".vob", ".3gp", ".divx"}
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac",
               ".wma", ".alac", ".aiff", ".ape"}
-DOC_EXTS = {".pdf", ".epub", ".mobi", ".azw3", ".cbz", ".cbr", ".djvu",
-            ".txt", ".doc", ".docx", ".odt", ".rtf"}
+# Ebooks / comics get their own "Books" type, split out from generic documents so the
+# library can organise them separately. PDFs stay under documents (ambiguous — could be
+# either), so a book only lands in Books when it's a true ebook/comic format.
+BOOK_EXTS = {".epub", ".mobi", ".azw", ".azw3", ".cbz", ".cbr", ".fb2", ".lit"}
+DOC_EXTS = {".pdf", ".djvu", ".txt", ".doc", ".docx", ".odt", ".rtf", ".ppt", ".pptx",
+            ".xls", ".xlsx", ".md"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".tiff", ".tif", ".bmp",
+              ".heic", ".heif", ".avif"}
 
 # Formats a modern browser plays natively (no transcode needed).
 NATIVE_VIDEO = {".mp4", ".m4v", ".webm", ".ogv"}
@@ -155,8 +161,12 @@ def _file_kind(ext):
         return "video"
     if ext in AUDIO_EXTS:
         return "audio"
+    if ext in BOOK_EXTS:
+        return "book"
     if ext in DOC_EXTS:
         return "doc"
+    if ext in IMAGE_EXTS:
+        return "image"
     return "other"
 
 
@@ -181,7 +191,8 @@ def _collect_media(root):
         if name.endswith(_TEMP_SUFFIXES):
             continue
         ext = os.path.splitext(name)[1].lower()
-        if ext not in VIDEO_EXTS and ext not in AUDIO_EXTS and ext not in DOC_EXTS:
+        if (ext not in VIDEO_EXTS and ext not in AUDIO_EXTS and ext not in BOOK_EXTS
+                and ext not in DOC_EXTS and ext not in IMAGE_EXTS):
             continue
         if "sample" in name.lower():
             continue
@@ -198,6 +209,11 @@ def _collect_media(root):
         keep_videos = set(id(f) for f in big_videos)
         found = [f for f in found if f[2] != "video" or id(f) in keep_videos]
     # else: keep all videos (the largest small one is the best we've got)
+    # Images are USUALLY incidental art (a movie's poster.jpg, an album's cover) — drop them
+    # when the item has real media, so they don't bloat the file list or turn a film into a
+    # "photo". Keep them only when images are all there is (a genuine photo set).
+    if any(f[2] in ("video", "audio", "book", "doc") for f in found):
+        found = [f for f in found if f[2] != "image"]
     return found
 
 
@@ -206,6 +222,8 @@ def _detect_type(cat, files, raw_name):
     has_video = any(f[2] == "video" for f in files)
     has_audio = any(f[2] == "audio" for f in files)
     has_doc = any(f[2] == "doc" for f in files)
+    has_book = any(f[2] == "book" for f in files)
+    has_image = any(f[2] == "image" for f in files)
 
     if cat == "music" or (has_audio and not has_video):
         return "album"
@@ -213,8 +231,12 @@ def _detect_type(cat, files, raw_name):
         return "tv"
     if cat == "movies" or has_video:
         return "movie"
-    if has_doc and not has_video and not has_audio:
+    if has_book and not (has_video or has_audio):
+        return "book"
+    if has_doc and not (has_video or has_audio or has_book):
         return "doc"
+    if has_image and not (has_video or has_audio or has_book or has_doc):
+        return "photo"
     return "other"
 
 
@@ -298,15 +320,24 @@ def _build_item(save_dir, cat, entry_name):
         })
 
     rel = os.path.relpath(item_path, save_dir)
+    iid = _stable_id(rel)
     meta = _lookup_meta(itype, title, year)
+    poster = meta.get("poster") if meta else None
+    # A photo set has no external art — use the actual first image as its tile thumbnail
+    # (served raw, no decode, cookie/trusted-auth). The UI falls back to a generated tile if
+    # it can't load. Gives a real "at a glance" preview for photos.
+    if not poster and itype == "photo":
+        imgs = [f for f in files if f.get("kind") == "image"]
+        if imgs:
+            poster = "/stream?id=%s&f=%d" % (iid, imgs[0]["i"])
     scan, quarantined = _scan_status(rel)
     return {
-        "id": _stable_id(rel),
+        "id": iid,
         "cat": cat,
         "type": itype,
         "title": title,
         "year": year,
-        "poster": meta.get("poster") if meta else None,
+        "poster": poster,
         "overview": meta.get("overview") if meta else None,
         "size": total,
         "files": files,
