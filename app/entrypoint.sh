@@ -47,14 +47,27 @@ ACTIVE_IDX=0
 export WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
 
 # ---- build the server POOL: primary first, then proton-*.conf, then vpn/*.conf --------
-CONFIGS=""
-[ -f "$CONF_PRIMARY" ] && CONFIGS="$CONF_PRIMARY"
-for f in /config/proton-*.conf /config/vpn/*.conf; do
-    [ -f "$f" ] || continue
-    case " $CONFIGS " in *" $f "*) ;; *) CONFIGS="$CONFIGS $f" ;; esac
-done
-N_CONF=0
-for c in $CONFIGS; do N_CONF=$((N_CONF + 1)); done
+# A function so it can be RE-RUN after the app adds a config at runtime (the VPN switcher).
+build_pool() {
+    CONFIGS=""
+    [ -f "$CONF_PRIMARY" ] && CONFIGS="$CONF_PRIMARY"
+    for f in /config/proton-*.conf /config/vpn/*.conf; do
+        [ -f "$f" ] || continue
+        case " $CONFIGS " in *" $f "*) ;; *) CONFIGS="$CONFIGS $f" ;; esac
+    done
+    N_CONF=0
+    for c in $CONFIGS; do N_CONF=$((N_CONF + 1)); done
+}
+build_pool
+
+# Open the kill-switch for ONE endpoint IP (idempotent). Used at startup for every pooled
+# server and by the runtime switcher BEFORE it brings a newly-added config up — so the new
+# server's handshake isn't dropped, while OUTPUT stays default-DROP for everything else.
+allow_endpoint() {
+    case "$1" in ""|*[!0-9.]*) return 1 ;; esac
+    iptables -C OUTPUT -d "$1" -p udp -j ACCEPT 2>/dev/null \
+        || iptables -A OUTPUT -d "$1" -p udp -j ACCEPT 2>/dev/null || true
+}
 
 endpoint_ip_of() {   # bare IP of a config's Endpoint (strips :port, [] brackets, and CR)
     grep -i '^[[:space:]]*Endpoint' "$1" 2>/dev/null | head -1 \
@@ -257,13 +270,64 @@ VPN_IP_BOUND="$VPN_IP"          # the exit IP the app is currently bound to (dri
 start_app
 echo "[vpntorrent] app started (pid $APP); tunnel supervisor active."
 
+# Restart the app whenever the exit IP changed, so libtorrent rebinds to the live tunnel.
+rebind_if_changed() {
+    if [ -n "$VPN_IP" ] && [ "$VPN_IP" != "$VPN_IP_BOUND" ]; then
+        echo "[vpntorrent] exit IP now $VPN_IP (was ${VPN_IP_BOUND:-none}) — restarting app to bind it."
+        VPN_IP_BOUND="$VPN_IP"; export VPN_IP
+        kill -TERM "$APP" 2>/dev/null; wait "$APP" 2>/dev/null; start_app
+    fi
+}
+
+# --- VPN switcher: the app drops a target config PATH in .vpn_switch; we switch to it here,
+# in the supervisor that OWNS the tunnel + kill-switch, and write the outcome to
+# .vpn_switch_result. The kill-switch never opens: we pre-authorise the new endpoint, bring
+# the new config up, and if it doesn't handshake we REVERT to the previous server. OUTPUT
+# stays DROP throughout — a failed or half-done switch can only fail closed, never leak.
+SWITCH_REQ=/config/.vpn_switch
+SWITCH_RES=/config/.vpn_switch_result
+handle_switch_request() {
+    [ -f "$SWITCH_REQ" ] || return 0
+    target=$(head -c 512 "$SWITCH_REQ" 2>/dev/null | tr -d '\r\n')
+    rm -f "$SWITCH_REQ"
+    case "$target" in
+        /config/*.conf) [ -f "$target" ] || { printf '{"ok":false,"error":"config not found"}' > "$SWITCH_RES"; return 0; } ;;
+        *) printf '{"ok":false,"error":"invalid config path"}' > "$SWITCH_RES"; return 0 ;;
+    esac
+    build_pool                                   # pick up a config the app just added
+    eip=$(endpoint_ip_of "$target")
+    case "$eip" in ""|*[!0-9.]*) printf '{"ok":false,"error":"endpoint must be an IP address"}' > "$SWITCH_RES"; return 0 ;; esac
+    tidx=0; _i=0
+    for _c in $CONFIGS; do _i=$((_i + 1)); [ "$_c" = "$target" ] && tidx="$_i"; done
+    [ "$tidx" -gt 0 ] || { printf '{"ok":false,"error":"config not in pool"}' > "$SWITCH_RES"; return 0; }
+    prev_idx="$ACTIVE_IDX"
+    allow_endpoint "$eip"                        # open the door for the new server FIRST
+    echo "[vpntorrent] VPN switch requested -> $target (endpoint $eip)"
+    if connect_at "$tidx"; then
+        echo "$target" > /config/.vpn_active 2>/dev/null || true
+        printf '{"ok":true,"exit_ip":"%s","active":%s,"total":%s}' "$VPN_IP" "$ACTIVE_IDX" "$N_CONF" > "$SWITCH_RES"
+        echo "[vpntorrent] VPN switched — exit $VPN_IP (server $ACTIVE_IDX/$N_CONF)."
+        rebind_if_changed
+    else
+        echo "[vpntorrent] switch failed to handshake — reverting."
+        if [ "$prev_idx" -gt 0 ] && connect_at "$prev_idx"; then :; else rotate_connect 1 || true; fi
+        printf '{"ok":false,"error":"the new server never handshaked — reverted to the previous one","exit_ip":"%s"}' "$VPN_IP" > "$SWITCH_RES"
+        rebind_if_changed
+    fi
+}
+
+_hb=0
 while true; do
-    sleep 20 & wait $!          # interruptible: SIGTERM runs on_term at once (app gets its save window)
+    sleep 3 & wait $!           # interruptible: SIGTERM runs on_term at once (app gets its save window)
     # App gone? exit non-zero so Docker's restart policy recreates the container.
     if ! kill -0 "$APP" 2>/dev/null; then
         echo "[vpntorrent] app process exited — letting Docker restart the container."
         exit 1
     fi
+    handle_switch_request       # responsive (~3s) VPN-switch handling, independent of the health cadence
+    _hb=$((_hb + 3))
+    [ "$_hb" -ge 18 ] || continue
+    _hb=0
     [ -n "$CONFIGS" ] || continue
 
     tunnel_healthy && continue

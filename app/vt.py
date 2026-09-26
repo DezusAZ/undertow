@@ -20,6 +20,8 @@ import unicodedata
 import hmac
 import signal
 import secrets
+import glob
+import socket
 import threading
 import subprocess
 import ipaddress
@@ -632,6 +634,159 @@ def usenet_pause(nzo_id, resume=False):
         return False
     r = _sab_api("queue", {"name": "resume" if resume else "pause", "value": nzo_id})
     return bool(r.get("status"))
+
+
+# ============================================================================
+# VPN PROVIDER SWITCHER
+# The app validates + saves WireGuard configs and REQUESTS a switch by dropping the target
+# path in /config/.vpn_switch; the entrypoint supervisor (which owns the tunnel + kill-switch)
+# performs the switch leak-safely and writes /config/.vpn_switch_result. The app never touches
+# wg or iptables itself. Endpoints MUST be IPs (the kill-switch pre-authorises an IP, not a
+# hostname), so a hostname endpoint is resolved to an IP at add time or rejected.
+_VPN_DIR = "/config/vpn"
+_VPN_SWITCH_REQ = "/config/.vpn_switch"
+_VPN_SWITCH_RES = "/config/.vpn_switch_result"
+_VPN_ACTIVE = "/config/.vpn_active"
+_VPN_PRIMARY = "/config/proton.conf"
+# A saved config path this app is willing to act on (never anything else under /config).
+_VPN_PATH_RE = re.compile(r"^/config/(proton\.conf|proton-[\w.-]+\.conf|vpn/[\w.-]+\.conf)$")
+
+
+def _wg_endpoint(text):
+    """(host, port) from a WireGuard config's Endpoint line, or (None, None)."""
+    m = re.search(r"(?im)^\s*Endpoint\s*=\s*(.+?)\s*$", text or "")
+    if not m:
+        return None, None
+    ep = m.group(1).strip()
+    if ep.startswith("["):                       # [v6]:port
+        host, _, rest = ep[1:].partition("]")
+        return host, rest.lstrip(":")
+    host, _, port = ep.rpartition(":")
+    return (host or ep), (port if host else "")
+
+
+def _wg_validate(text):
+    """Validate a WireGuard config; return normalized text. Raises ValueError with a reason."""
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    low = t.lower()
+    if "[interface]" not in low:
+        raise ValueError("not a WireGuard config — missing an [Interface] section")
+    if "[peer]" not in low:
+        raise ValueError("missing the [Peer] section")
+    if not re.search(r"(?im)^\s*PrivateKey\s*=\s*\S", t):
+        raise ValueError("missing the Interface PrivateKey")
+    if not re.search(r"(?im)^\s*Address\s*=\s*\S", t):
+        raise ValueError("missing the Interface Address")
+    if not re.search(r"(?im)^\s*PublicKey\s*=\s*\S", t):
+        raise ValueError("missing the Peer PublicKey")
+    host, _port = _wg_endpoint(t)
+    if not host:
+        raise ValueError("missing the Peer Endpoint")
+    return t + "\n"
+
+
+def _vpn_add(text, name=""):
+    """Validate + save a WireGuard config to /config/vpn/. Rewrites a hostname Endpoint to an
+    IP (the kill-switch needs an IP), or refuses. Returns the saved path. Raises ValueError."""
+    t = _wg_validate(text)
+    host, port = _wg_endpoint(t)
+    try:
+        ipaddress.ip_address(host)               # already an IP -> good
+    except ValueError:
+        ip = None
+        try:
+            ip = socket.gethostbyname(host)      # resolve via the live tunnel DNS
+        except Exception:
+            ip = None
+        if not ip:
+            raise ValueError("the Endpoint is a hostname (%s) I can't resolve right now — put "
+                             "the server's IP address in the Endpoint line and try again." % host)
+        t = re.sub(r"(?im)^(\s*Endpoint\s*=\s*).+$",
+                   lambda m: m.group(1) + ip + (":" + port if port else ""), t)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or host or "vpn")).strip("-.")[:40] or "vpn"
+    os.makedirs(_VPN_DIR, exist_ok=True)
+    path = os.path.join(_VPN_DIR, safe + ".conf")
+    i, base = 1, path
+    while os.path.exists(path):
+        path = base[:-5] + "-%d.conf" % i
+        i += 1
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(t)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.chmod(tmp, 0o600)                     # a private key lives in here
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    return path
+
+
+def _vpn_list():
+    """Pool of saved configs with which is active + each endpoint (no secrets)."""
+    active = ""
+    try:
+        active = open(_VPN_ACTIVE).read().strip()
+    except OSError:
+        pass
+    pool = [_VPN_PRIMARY] if os.path.exists(_VPN_PRIMARY) else []
+    for p in sorted(glob.glob("/config/proton-*.conf")) + sorted(glob.glob(_VPN_DIR + "/*.conf")):
+        if p not in pool:
+            pool.append(p)
+    if not active and pool:
+        active = pool[0]                         # startup default is the primary/first
+    out = []
+    for p in pool:
+        try:
+            host, _port = _wg_endpoint(open(p).read())
+        except OSError:
+            continue
+        out.append({"path": p, "name": os.path.basename(p)[:-5], "endpoint": host or "",
+                    "active": (p == active), "primary": (p == _VPN_PRIMARY)})
+    return out
+
+
+def _vpn_switch_request(path):
+    """Ask the supervisor to switch. Non-blocking: writes the request, clears the old result."""
+    if not _VPN_PATH_RE.match(path or "") or not os.path.exists(path):
+        return False
+    try:
+        os.remove(_VPN_SWITCH_RES)
+    except OSError:
+        pass
+    try:
+        with open(_VPN_SWITCH_REQ, "w") as f:
+            f.write(path)
+        return True
+    except OSError:
+        return False
+
+
+def _vpn_switch_result():
+    """The supervisor's outcome for the last switch, or {'pending': True} until it lands."""
+    try:
+        return json.load(open(_VPN_SWITCH_RES))
+    except Exception:
+        return {"pending": True}
+
+
+def _vpn_remove(path):
+    """Delete a saved config. Never the primary, never the currently-active one."""
+    if not _VPN_PATH_RE.match(path or "") or path == _VPN_PRIMARY:
+        return False
+    active = ""
+    try:
+        active = open(_VPN_ACTIVE).read().strip()
+    except OSError:
+        pass
+    if path == active:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
 
 
 def remove(ih, delete_files=False):
@@ -2407,12 +2562,55 @@ function renderThemePick(){var el=document.getElementById('themePick');if(!el)re
       +'<span class="sw sw-'+x[0]+'"></span><span class="tl"><b>'+esc(x[1])+'</b><small>'+esc(x[2])+'</small></span>'
       +(on?'<span class="ck">✓</span>':'')+'</button>';}).join('');}
 async function loadVpnSettings(){var el=document.getElementById('vpnsettings');if(!el)return;
-  var d={};try{d=await (await fetch('/status')).json();}catch(e){}
-  var on=!!d.vpn;var col=on?'#3fb950':'#f85149';
-  el.innerHTML='<div class=aiset><div class=meta style="justify-content:flex-start;margin-top:0"><h4>🛡 VPN</h4>'
+  var d={};try{d=await (await hfetch('/vpn/list')).json();}catch(e){return;}
+  var on=!!d.vpn;var col=on?'#3fb950':'#f85149';var items=d.items||[];
+  var rows=items.map(function(v){
+    var badge=v.active?'<span class="lib-badge t-movie">active</span>':(v.primary?'<span class="lib-badge">primary</span>':'');
+    var acts=v.active?'<span style="color:var(--muted);font-size:12px">in use</span>'
+      :('<button class=sec onclick="vpnSwitch(\''+esc(v.path)+'\',this)">Switch to this</button>'
+        +(v.primary?'':'<button class=sec onclick="vpnRemove(\''+esc(v.path)+'\')">✕ Remove</button>'));
+    return '<div class=t><div class=meta style="justify-content:flex-start;gap:9px"><b style="min-width:110px">'+esc(v.name)+'</b>'
+      +badge+'<span style="color:var(--muted);font-size:12px">'+esc(v.endpoint||'')+'</span>'
+      +'<span style="margin-left:auto;display:flex;gap:6px">'+acts+'</span></div></div>';
+  }).join('');
+  el.innerHTML='<div class=aiset>'
+    +'<div class=meta style="justify-content:flex-start;margin-top:0"><h4>🛡 VPN</h4>'
     +'<span style="margin-left:auto;color:'+col+'">● '+(on?('protected · exit '+esc(d.ip||'')):'not connected')+'</span></div>'
-    +'<div style="font-size:12.5px;color:var(--muted);margin-top:6px">Every download is locked to this tunnel — if it drops, downloads pause automatically, and nothing ever leaves your real connection. '
-    +'Switching providers from here — paste or upload a WireGuard config, validated and hot-swapped with the kill-switch re-armed and leak-checked before it goes live, plus a picker of vetted privacy VPNs — is the next thing being added to this page.</div></div>';}
+    +'<div style="font-size:12.5px;color:var(--muted);margin:6px 0 10px">Every download is locked to this tunnel — if it drops, downloads pause and nothing leaks. A switch validates the new config, opens the kill-switch for its server, brings it up, and <b>reverts automatically if it doesn’t connect</b>. The tunnel only ever fails closed — there is no leak window.</div>'
+    +'<div id=vpnMsg style="font-size:12.5px;margin:0 0 8px"></div>'
+    +(rows||'<div style="color:var(--muted);font-size:13px">No configs found.</div>')
+    +'<div class=row style="margin-top:12px"><input type=text id=vpnName placeholder="name it (e.g. Mullvad-US)" style="max-width:200px">'
+    +'<label class=sec style="cursor:pointer">Choose .conf…<input type=file id=vpnFile accept=".conf,text/plain" onchange="vpnPickFile(this)" hidden></label></div>'
+    +'<textarea id=vpnText placeholder="…or paste a WireGuard config ([Interface] / [Peer], Endpoint must be an IP)" spellcheck=false style="width:100%;min-height:120px;margin-top:8px;background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);color:var(--text);font:12.5px var(--mono);padding:10px"></textarea>'
+    +'<div class=row style="margin-top:8px"><button class=sec onclick="vpnAdd(this)">Add this VPN</button>'
+    +'<span style="font-size:11.5px;color:var(--faint)">The private key stays on this box (saved 0600) and only ever reaches its own server through the tunnel.</span></div>'
+    +'<div style="margin-top:14px;font-size:12.5px;color:var(--muted);line-height:1.6"><b style="color:var(--text)">Need a provider?</b> Reputable privacy VPNs that hand you WireGuard configs: '
+    +'<a href="https://protonvpn.com" target=_blank rel=noopener>Proton VPN</a> (has a real free tier), '
+    +'<a href="https://mullvad.net" target=_blank rel=noopener>Mullvad</a>, '
+    +'<a href="https://www.ivpn.net" target=_blank rel=noopener>IVPN</a>. '
+    +'Steer clear of random “free” VPNs — for a privacy tool they usually monetise your traffic, which is the opposite of the point.</div>'
+    +'</div>';}
+function vpnMsg(m,bad){var e=document.getElementById('vpnMsg');if(e){e.textContent=m||'';e.style.color=bad?'#f85149':'#3fb950';}}
+function vpnPickFile(inp){var f=inp.files&&inp.files[0];if(!f)return;var r=new FileReader();
+  r.onload=function(){document.getElementById('vpnText').value=r.result;var nm=document.getElementById('vpnName');if(nm&&!nm.value)nm.value=f.name.replace(/\.conf$/i,'');};r.readAsText(f);}
+async function vpnAdd(btn){var text=document.getElementById('vpnText').value.trim();if(!text){vpnMsg('Paste or choose a config first.',true);return;}
+  btn.disabled=true;vpnMsg('Validating…');
+  try{var r=await hfetch('/vpn/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text,name:(document.getElementById('vpnName').value||'').trim()})});var j=await r.json();
+    if(j.ok){vpnMsg('Added “'+(j.name||'')+'” — click “Switch to this” to use it.');loadVpnSettings();}
+    else vpnMsg(j.error||'Could not add it.',true);}catch(e){vpnMsg('Could not add it.',true);}
+  btn.disabled=false;}
+async function vpnRemove(path){if(!confirm('Remove this saved VPN config from the box?'))return;
+  try{await hfetch('/vpn/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})});}catch(e){}loadVpnSettings();}
+async function vpnSwitch(path,btn){if(!confirm('Switch the VPN to this config now?\n\nDownloads pause during the switch; if the new server doesn’t connect it reverts to the current one automatically.'))return;
+  if(btn)btn.disabled=true;vpnMsg('Switching… bringing the new tunnel up (can take ~15s).');
+  try{await hfetch('/vpn/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})});}catch(e){}
+  var t0=Date.now();
+  (function poll(){
+    fetch('/vpn/switch/status').then(function(r){return r.json();}).then(function(j){
+      if(j&&j.pending!==true){ if(j.ok){vpnMsg('✓ Switched — new exit IP '+esc(j.exit_ip||'')+'.');}else{vpnMsg('✗ '+esc(j.error||'switch failed')+'.',true);} setTimeout(loadVpnSettings,1500); return; }
+      if(Date.now()-t0<75000){setTimeout(poll,2000);} else {vpnMsg('Still working — check the status line above in a moment.',true);loadVpnSettings();}
+    }).catch(function(){ if(Date.now()-t0<75000){setTimeout(poll,2500);} });   // app may restart mid-switch — keep polling through it
+  })();}
 var NAV_TABS=['search','sources','hunt','engines','downloads','library','settings'];
 var _navBusy=false;
 // Tabs used to be pure JS with no URL, so the browser's Back button left the app
@@ -3472,6 +3670,11 @@ class H(BaseHTTPRequestHandler):
         elif path == "/hunt/brain":
             st = hunt_brain.brain_status() if hunt_brain else {"using_llm": False, "reason": "unavailable"}
             self._send(200, json.dumps(st), "application/json")
+        elif path == "/vpn/list":
+            self._send(200, json.dumps({"items": _vpn_list(), "vpn": vpn_ok, "ip": VPN_IP}),
+                       "application/json")
+        elif path == "/vpn/switch/status":
+            self._send(200, json.dumps(_vpn_switch_result()), "application/json")
         elif path == "/hunt/get":
             hid = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
             h = hunt.get_hunt(hid) if hunt else None
@@ -3763,6 +3966,55 @@ class H(BaseHTTPRequestHandler):
             valid = bool(fetcher and re.fullmatch(r"d-[0-9a-f]+-[0-9a-f]+", did or ""))
             ok = bool(valid and (fetcher.resume(did) if path.endswith("resume") else fetcher.pause(did)))
             self._send(200, json.dumps({"ok": ok}), "application/json")
+        elif path == "/vpn/add":
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                n = -1
+            if not (0 <= n <= 262144):
+                self._send(400, "bad request", "text/plain"); return
+            try:
+                data = json.loads(self.rfile.read(n).decode() or "{}")
+            except Exception:
+                data = {}
+            try:
+                p = _vpn_add(data.get("text", ""), (data.get("name", "") or "").strip())
+                self._send(200, json.dumps({"ok": True, "path": p,
+                                            "name": os.path.basename(p)[:-5]}), "application/json")
+            except ValueError as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)[:200]}), "application/json")
+            except Exception as e:
+                self._send(500, json.dumps({"ok": False, "error": "could not save (%s)" % str(e)[:120]}),
+                           "application/json")
+        elif path == "/vpn/switch":
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                n = -1
+            data = {}
+            if 0 <= n <= 4096:
+                try:
+                    data = json.loads(self.rfile.read(n).decode() or "{}")
+                except Exception:
+                    data = {}
+            ok = _vpn_switch_request(data.get("path", ""))
+            # non-blocking: the supervisor does the switch (and may restart this app on
+            # success); the UI polls /vpn/switch/status for the outcome.
+            self._send(200, json.dumps({"ok": ok, "pending": ok,
+                                        "error": "" if ok else "invalid or missing config"}),
+                       "application/json")
+        elif path == "/vpn/remove":
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                n = -1
+            data = {}
+            if 0 <= n <= 4096:
+                try:
+                    data = json.loads(self.rfile.read(n).decode() or "{}")
+                except Exception:
+                    data = {}
+            self._send(200, json.dumps({"ok": _vpn_remove(data.get("path", ""))}), "application/json")
         elif path == "/pause":
             pause(self._ih())
             self._send(200, "ok")
