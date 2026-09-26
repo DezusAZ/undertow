@@ -1562,7 +1562,7 @@ LOGIN_PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Undertow — login</title><link rel=icon href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a2b1c'/%3E%3Cpath d='M32 12l16 6v14c0 11-7 18-16 22-9-4-16-11-16-22V18l16-6z' fill='none' stroke='%2368f0a6' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M32 23v16M24 32l8 8 8-8' stroke='%2368f0a6' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"><style>
 :root{--green:#34dd7d;--green-b:#68f0a6;--font:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",system-ui,sans-serif}
 *{box-sizing:border-box}
-body{font:15px/1.5 var(--font);margin:0;color:#e8f2ec;-webkit-font-smoothing:antialiased;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px;background:radial-gradient(900px 500px at 50% -140px,#0d2a1c,#06110c 62%) fixed,#06110c}
+body{font:15px/1.5 var(--font);margin:0;color:var(--text);-webkit-font-smoothing:antialiased;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px;background:radial-gradient(900px 500px at 50% -140px,var(--glow),var(--canvas) 62%) fixed,var(--canvas)}
 .box{background:linear-gradient(180deg,#0b1913,rgba(11,25,19,.6));border:1px solid rgba(120,220,160,.14);border-radius:20px;padding:34px 30px;width:328px;text-align:center;box-shadow:0 24px 60px rgba(0,0,0,.5)}
 .lmark{width:56px;height:56px;border-radius:16px;margin:0 auto 16px;display:grid;place-items:center;background:linear-gradient(155deg,#1a5c3b,#0a2b1c);border:1px solid rgba(120,220,160,.22);box-shadow:0 8px 22px rgba(0,0,0,.4),0 0 30px -8px rgba(52,221,125,.3)}
 .lmark svg{width:30px;height:30px}
@@ -1583,6 +1583,7 @@ __ERR__
 
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
+<script>try{var _t=localStorage.getItem('vt_theme');if(_t&&_t!=='dark')document.documentElement.setAttribute('data-theme',_t);}catch(e){}</script>
 <title>Undertow</title><link rel=icon href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a2b1c'/%3E%3Cpath d='M32 12l16 6v14c0 11-7 18-16 22-9-4-16-11-16-22V18l16-6z' fill='none' stroke='%2368f0a6' stroke-width='3' stroke-linejoin='round'/%3E%3Cpath d='M32 23v16M24 32l8 8 8-8' stroke='%2368f0a6' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"><style>
 :root{
 --canvas:#06110c;--glow:#0d2a1c;--surface:#0b1913;--surface-2:#0f2318;--surface-3:#122a1d;
@@ -1594,6 +1595,24 @@ PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
 --font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Segoe UI",system-ui,sans-serif;
 --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
 --ease:cubic-bezier(.4,0,.2,1);--sh:0 12px 34px rgba(0,0,0,.5)}
+/* Themes: the default (no attribute) is the dark palette above. Each theme redefines only
+   the ground/text/hair tokens + accent so the whole UI reflows. Chosen in Settings, saved
+   per device, applied before paint by the tiny head script. */
+:root[data-theme="light"]{
+--canvas:#eef2f0;--glow:#dcefe4;--surface:#ffffff;--surface-2:#f2f7f4;--surface-3:#e8f0eb;
+--hair:rgba(18,80,50,.15);--hair2:rgba(18,80,50,.28);
+--text:#0d1a13;--muted:#4b6156;--faint:#7b9088;
+--green:#12a55a;--green-b:#0b8f4c;--green-d:#cdeedb;--glowc:rgba(18,165,90,.22);
+--blue:#1f7fd6;--violet:#8a5cf0;--amber:#c8871a;--red:#d64545;
+--sh:0 10px 30px rgba(20,50,35,.14)}
+:root[data-theme="hacker"]{
+--canvas:#000000;--glow:#001a0d;--surface:#020b06;--surface-2:#04140a;--surface-3:#061c0e;
+--hair:rgba(0,255,120,.20);--hair2:rgba(0,255,120,.38);
+--text:#2bff88;--muted:#1aa860;--faint:#0f7a44;
+--green:#00ff7f;--green-b:#7dffbb;--green-d:#003b1f;--glowc:rgba(0,255,127,.45);
+--blue:#00e5ff;--violet:#c77dff;--amber:#ffd000;--red:#ff5c5c;
+--font:var(--mono);--sh:0 0 26px rgba(0,255,127,.18)}
+:root[data-theme="hacker"] body{background:linear-gradient(rgba(0,20,10,.5),rgba(0,0,0,.5)),repeating-linear-gradient(0deg,rgba(0,255,120,.03) 0,rgba(0,255,120,.03) 1px,transparent 1px,transparent 3px),#000}
 *{box-sizing:border-box}
 body{margin:0;font:15px/1.55 var(--font);color:var(--text);-webkit-font-smoothing:antialiased;
 background:radial-gradient(1100px 560px at 50% -160px,var(--glow),var(--canvas) 62%) fixed,var(--canvas);min-height:100vh}
@@ -1735,6 +1754,17 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 .lib-tab.on{color:#04140b;background:linear-gradient(180deg,var(--green-b),var(--green));border-color:transparent;font-weight:600}
 .lib-tab .n{font-size:11px;opacity:.8;font-variant-numeric:tabular-nums}
 .lib-tab.on .n{opacity:.75}
+.themepick{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.themecard{display:flex;align-items:center;gap:11px;text-align:left;background:var(--surface);border:1px solid var(--hair);border-radius:12px;padding:11px 13px;cursor:pointer;color:var(--text);font:inherit;transition:.16s var(--ease)}
+.themecard:hover{border-color:var(--hair2)}
+.themecard.on{border-color:var(--green);box-shadow:0 0 0 2px var(--glowc)}
+.themecard .sw{width:34px;height:34px;border-radius:8px;flex:0 0 auto;border:1px solid rgba(128,128,128,.25)}
+.sw-dark{background:radial-gradient(circle at 30% 28%,#34dd7d,#0b1913 70%)}
+.sw-light{background:radial-gradient(circle at 30% 28%,#12a55a,#ffffff 72%)}
+.sw-hacker{background:radial-gradient(circle at 30% 28%,#00ff7f,#000 68%)}
+.themecard .tl{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.themecard .tl b{font-size:14px}.themecard .tl small{font-size:11.5px;color:var(--muted)}
+.themecard .ck{color:var(--green);font-weight:700;flex:0 0 auto}
 .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px}
 .lib-tile{background:var(--surface);border:1px solid var(--hair);border-radius:14px;overflow:hidden;cursor:pointer;position:relative;transition:transform .18s var(--ease),box-shadow .18s var(--ease),border-color .18s var(--ease)}
 .lib-tile:hover{transform:translateY(-3px);box-shadow:var(--sh);border-color:var(--hair2);z-index:2}
@@ -1821,6 +1851,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 <button class="tabbtn" data-tab=downloads title="Downloads — torrents, Usenet and direct files in progress; everything goes through the VPN and the scanner" onclick="navTo('downloads')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 19h16"/></svg>Downloads <span id=dlcount></span></button>
 <button class="tabbtn" data-tab=library title="Library — what has finished: play here or hand it to VLC / any player on your device" onclick="navTo('library')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3Z"/></svg>Library</button>
 <button class="tabbtn" data-tab=engines title="Engines — the services under the hood, the local AI, notifications and health" onclick="navTo('engines')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6"/></svg>Engines</button>
+<button class="tabbtn" data-tab=settings title="Settings — appearance/theme and your VPN provider" onclick="navTo('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1Z"/></svg>Settings</button>
 </div>
 <div id=tab-search class=tab-panel>
 <form class=search onsubmit="search(event)">
@@ -1886,6 +1917,15 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 <div id=aisettings></div>
 <div id=notifysettings></div>
 <div id=engines></div>
+</div>
+<div id=tab-settings class=tab-panel hidden>
+<div class=srcintro>⚙ <b>Settings</b> — make it yours. Appearance is saved on this device; the VPN section changes what protects every download, so it's handled carefully.</div>
+<div class=aiset>
+<div class=meta style="justify-content:flex-start;margin-top:0"><h4>🎨 Appearance</h4></div>
+<div style="font-size:12.5px;color:var(--muted);margin:6px 0 10px">Pick a theme — applied instantly and remembered on this device (each device can differ).</div>
+<div id=themePick class=themepick></div>
+</div>
+<div id=vpnsettings></div>
 </div>
 <div id=tab-downloads class=tab-panel hidden>
 <div id=list></div>
@@ -2352,7 +2392,28 @@ async function huntAct(hid,act){if(act==='delete'&&!confirm('Delete this hunt an
 try{var r=await hfetch('/hunt/'+act,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:hid})});var j={};try{j=await r.json();}catch(_){}
 if(!r.ok||j.ok===false)huntErr('Could not '+act+' the hunt'+(j.error?(': '+j.error):(r.status==403?' — reload the page and try again.':'')));}catch(e){}
 if(act==='delete'){delete HUNT_EXPANDED[hid];delete HUNT_RES[hid];delete HUNT_LOG[hid];}loadHunts();}
-var NAV_TABS=['search','sources','hunt','engines','downloads','library'];
+// --- appearance / themes (per-device, applied before paint by the head script) ---
+var THEMES=[['dark','Dark','The default — deep green on near-black'],
+            ['light','Light','Bright and high-contrast for daylight'],
+            ['hacker','Hacker','Black terminal, phosphor green, monospace']];
+function currentTheme(){try{return localStorage.getItem('vt_theme')||'dark';}catch(e){return 'dark';}}
+function setTheme(t){try{localStorage.setItem('vt_theme',t);}catch(e){}
+  if(t==='dark')document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme',t);
+  renderThemePick();}
+function renderThemePick(){var el=document.getElementById('themePick');if(!el)return;var cur=currentTheme();
+  el.innerHTML=THEMES.map(function(x){var on=x[0]===cur;
+    return '<button class="themecard'+(on?' on':'')+'" onclick="setTheme(\''+x[0]+'\')">'
+      +'<span class="sw sw-'+x[0]+'"></span><span class="tl"><b>'+esc(x[1])+'</b><small>'+esc(x[2])+'</small></span>'
+      +(on?'<span class="ck">✓</span>':'')+'</button>';}).join('');}
+async function loadVpnSettings(){var el=document.getElementById('vpnsettings');if(!el)return;
+  var d={};try{d=await (await fetch('/status')).json();}catch(e){}
+  var on=!!d.vpn;var col=on?'#3fb950':'#f85149';
+  el.innerHTML='<div class=aiset><div class=meta style="justify-content:flex-start;margin-top:0"><h4>🛡 VPN</h4>'
+    +'<span style="margin-left:auto;color:'+col+'">● '+(on?('protected · exit '+esc(d.ip||'')):'not connected')+'</span></div>'
+    +'<div style="font-size:12.5px;color:var(--muted);margin-top:6px">Every download is locked to this tunnel — if it drops, downloads pause automatically, and nothing ever leaves your real connection. '
+    +'Switching providers from here — paste or upload a WireGuard config, validated and hot-swapped with the kill-switch re-armed and leak-checked before it goes live, plus a picker of vetted privacy VPNs — is the next thing being added to this page.</div></div>';}
+var NAV_TABS=['search','sources','hunt','engines','downloads','library','settings'];
 var _navBusy=false;
 // Tabs used to be pure JS with no URL, so the browser's Back button left the app
 // entirely and dumped you at the login page. Each tab is now a real history entry,
@@ -2372,7 +2433,7 @@ function applyHash(){
   var modalOpen=modal && !modal.hidden;
   if(modalOpen && !wantModal){ libCloseModal(true); }
 }
-function showTab(name,fromNav){['search','sources','hunt','engines','downloads','library'].forEach(function(t){var p=document.getElementById('tab-'+t);if(p)p.hidden=(t!==name);var b=document.querySelector('.tabbtn[data-tab='+t+']');if(b)b.classList.toggle('active',t===name);});if(name==='library'&&!LIB_LOADED)loadLibrary();if(name==='engines'){loadEngines();loadAiSettings();loadNotifySettings();}if(name==='hunt'){loadHunts();if(!huntTimer)huntTimer=setInterval(function(){if(huntTabActive())loadHunts();},4000);}
+function showTab(name,fromNav){['search','sources','hunt','engines','downloads','library','settings'].forEach(function(t){var p=document.getElementById('tab-'+t);if(p)p.hidden=(t!==name);var b=document.querySelector('.tabbtn[data-tab='+t+']');if(b)b.classList.toggle('active',t===name);});if(name==='library'&&!LIB_LOADED)loadLibrary();if(name==='engines'){loadEngines();loadAiSettings();loadNotifySettings();}if(name==='settings'){renderThemePick();loadVpnSettings();}if(name==='hunt'){loadHunts();if(!huntTimer)huntTimer=setInterval(function(){if(huntTabActive())loadHunts();},4000);}
 if(!fromNav){_navBusy=true;try{if(location.hash.slice(1).split('/')[0]!==name){location.hash=name;}}finally{_navBusy=false;}}}
 async function loadEngines(){var el=document.getElementById('engines');el.innerHTML='<div class=empty>Checking engines…</div>';
 var r=await fetch('/engines');if(r.status==401){location.href='/login';return}
