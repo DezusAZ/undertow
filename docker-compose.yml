@@ -42,6 +42,7 @@ services:
       # Origins allowed to POST (CSRF). Your reverse-proxy / front-door URL goes here,
       # comma-separated. Host and X-Forwarded-Host are always accepted automatically.
       - TRUSTED_ORIGINS=${TRUSTED_ORIGINS:-}
+      - TRUSTED_LOGIN_CIDRS=${TRUSTED_LOGIN_CIDRS-127.0.0.0/8,100.64.0.0/10}   # networks that skip the login (empty = password everywhere)
     ports:
       - "${WEB_PORT:-8722}:8722"   # web UI -> http://<host>:${WEB_PORT}
     volumes:

@@ -22,6 +22,7 @@ import signal
 import secrets
 import threading
 import subprocess
+import ipaddress
 import faulthandler
 try:                                    # DEBUG: `kill -USR1 <pid>` dumps all thread stacks
     faulthandler.register(signal.SIGUSR1)
@@ -139,6 +140,56 @@ for _o in (os.environ.get("TRUSTED_ORIGINS", "") or "").split(","):
         except Exception:
             pass
 _csrf_seen = set()                     # distinct rejected origins already logged
+
+# --- trusted-network auto-login --------------------------------------------
+# The tool is built to ALWAYS require a password. But a single-operator install that is
+# only reachable over the LAN + Tailscale (not the public internet) can safely let clients
+# from those networks in without a password. Clients whose source IP is in one of these
+# networks skip the login; anything else still hits the password wall. Loopback (127/8)
+# covers on-box requests AND the tailnet HTTPS-Serve proxy (it delivers to 127.0.0.1);
+# 100.64.0.0/10 covers a device hitting the raw Tailscale IP directly. Add your own LAN
+# subnet (e.g. 192.168.0.0/24) via TRUSTED_LOGIN_CIDRS in .env. Set it EMPTY to require the
+# password everywhere. A public Tailscale FUNNEL request is never trusted (see
+# _client_trusted), so this stays safe even if Funnel is later enabled on the front door.
+_TRUSTED_LOGIN_NETS = []
+for _c in (os.environ.get("TRUSTED_LOGIN_CIDRS", "127.0.0.0/8,100.64.0.0/10") or "").split(","):
+    _c = _c.strip()
+    if _c:
+        try:
+            _TRUSTED_LOGIN_NETS.append(ipaddress.ip_network(_c, strict=False))
+        except ValueError:
+            pass
+
+
+def _proxy_gateway_net():
+    """The container's default gateway on its docker bridge — the source address the HOST's
+    Tailscale HTTPS-Serve proxy appears as when it forwards a tailnet request to us (docker's
+    userland proxy rewrites 127.0.0.1 to this gateway). Auto-detected so it survives docker
+    re-assigning the bridge subnet. A request that reached us THIS way is either a tailnet
+    user via Serve (trusted) or a public Funnel request (rejected by the header check first),
+    NEVER a direct public port-forward (those keep their real public source). Returns a /32
+    network or None. Only the main table is read — the wg tunnel's default lives in table 51820."""
+    if _TRUSTED_LOGIN_NETS is None:
+        return None
+    try:
+        out = subprocess.run(["ip", "route", "show", "table", "main", "default"],
+                             capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"default via (\d{1,3}(?:\.\d{1,3}){3})", out)
+        if m:
+            return ipaddress.ip_network(m.group(1) + "/32")
+    except Exception:
+        pass
+    return None
+
+
+if _TRUSTED_LOGIN_NETS:                 # only trust the proxy path if auto-login is on at all
+    _gw = _proxy_gateway_net()
+    if _gw is not None and not any(_gw.subnet_of(n) for n in _TRUSTED_LOGIN_NETS
+                                   if n.version == 4):
+        _TRUSTED_LOGIN_NETS.append(_gw)
+if _TRUSTED_LOGIN_NETS:
+    print("[vpntorrent] passwordless login from: %s (public/Funnel still needs the password)"
+          % ", ".join(str(n) for n in _TRUSTED_LOGIN_NETS), flush=True)
 
 _LOGIN_FAILS = {}                      # ip -> [fail_count, window_start_epoch]
 _LOGIN_MAX = 5                         # failures allowed per window
@@ -2966,7 +3017,26 @@ class H(BaseHTTPRequestHandler):
                 return part[len("vt_session="):]
         return ""
 
+    def _client_trusted(self):
+        """True if this request may skip the login: it came from a trusted network
+        (loopback / the tailnet Serve proxy / the LAN, per TRUSTED_LOGIN_CIDRS) AND is not a
+        public Funnel request. The peer's real TCP address is used, never a spoofable
+        X-Forwarded-For header."""
+        if not _TRUSTED_LOGIN_NETS:
+            return False
+        # A request that entered via Tailscale FUNNEL is from the public internet even though
+        # the Serve proxy hands it to us as 127.0.0.1 — Tailscale marks it, so never trust it.
+        if self.headers.get("Tailscale-Funnel-Request"):
+            return False
+        try:
+            ip = ipaddress.ip_address((self.client_address or [""])[0])
+        except (ValueError, IndexError, TypeError):
+            return False
+        return any(ip in net for net in _TRUSTED_LOGIN_NETS)
+
     def _authed(self):
+        if self._client_trusted():          # LAN / Tailscale: no password needed
+            return True
         exp = _sessions.get(self._token())
         return bool(exp and exp > time.time())
 
