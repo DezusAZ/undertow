@@ -33,6 +33,7 @@ _jobs = {}            # id -> job dict
 _order = []           # ids in add order
 _wake = threading.Event()
 _stop = {}            # id -> Event (cancel a running fetch)
+_pausing = set()      # ids whose in-flight fetch should stop and HOLD the .part (user pause)
 _save_dir = "/downloads"
 _folders = set()
 _vpn_ok = lambda: True
@@ -67,8 +68,11 @@ def _load():
     with _lock:
         for j in data:
             if isinstance(j, dict) and j.get("id"):
-                if j.get("state") == "downloading":      # interrupted by a restart -> resume
+                st = j.get("state")
+                if st in ("downloading", "vpn_wait"):    # interrupted by a restart -> resume
                     j["state"] = "queued"
+                elif st == "pausing":                    # died mid-pause -> honour the pause
+                    j["state"] = "paused"
                 _jobs[j["id"]] = j
                 _order.append(j["id"])
 
@@ -195,6 +199,38 @@ def remove(jid, delete_files=False):
     return True
 
 
+def pause(jid):
+    """User-pause a direct download: stop the in-flight stream but KEEP the .part so resume
+    picks up via HTTP Range. Distinct from the VPN-down auto-pause so a VPN recovery doesn't
+    resume something the user deliberately paused. Returns True if it was pausable."""
+    with _lock:
+        j = _jobs.get(jid)
+        if not j or j.get("state") not in ("queued", "downloading"):
+            return False
+        if j["state"] == "downloading":
+            j["state"] = "pausing"        # the worker sees _pausing and holds the .part
+            _pausing.add(jid)
+        else:
+            j["state"] = "paused"         # not started yet — just hold it out of the queue
+        j["speed"] = 0
+    _save()
+    return True
+
+
+def resume(jid):
+    """Resume a paused (or VPN-parked) direct download — re-queue it; the worker continues
+    from the .part with a Range request."""
+    with _lock:
+        j = _jobs.get(jid)
+        if not j or j.get("state") not in ("paused", "pausing", "vpn_wait"):
+            return False
+        j["state"] = "queued"
+        _pausing.discard(jid)
+    _save()
+    _wake.set()
+    return True
+
+
 def snapshot():
     """Rows shaped like the Downloads tab's usenet rows (+ kind='direct')."""
     out = []
@@ -203,16 +239,21 @@ def snapshot():
     for j in jobs:
         size = j.get("size") or 0
         got = j.get("got") or 0
+        spd = j.get("speed") or 0
         pct = round(100.0 * got / size, 1) if size else (100.0 if j.get("state") == "done" else 0.0)
         st = j.get("state", "")
         state = {"queued": "Queued", "downloading": "Downloading", "done": "Done",
-                 "failed": "Failed", "paused": "Paused (VPN down)"}.get(st, st)
+                 "failed": "Failed", "paused": "Paused", "pausing": "Pausing…",
+                 "vpn_wait": "Paused (VPN down)"}.get(st, st)
+        # seconds remaining from bytes-left ÷ live speed; -1 = unknown
+        eta = int((size - got) / spd) if (st == "downloading" and spd > 0 and size > got) else -1
         out.append({"id": j["id"], "kind": "direct", "name": j.get("name", ""), "cat": j.get("cat", "other"),
-                    "progress": pct, "state": state, "paused": st == "paused",
-                    "eta": "", "size": _human(size) if size else "", "done": st in ("done", "failed"),
+                    "progress": pct, "state": state,
+                    "paused": st in ("paused", "pausing", "vpn_wait"), "pausable": st in ("queued", "downloading"),
+                    "eta": eta, "size": _human(size) if size else "", "done": st in ("done", "failed"),
                     "error": j.get("error", "") if st == "failed" else "",
                     "host": j.get("host", ""), "url": j.get("url", ""),
-                    "speed": j.get("speed", 0) if st == "downloading" else 0})
+                    "speed": spd if st == "downloading" else 0})
     return out
 
 
@@ -312,8 +353,12 @@ def _fetch(j):
             while True:
                 if stop.is_set():
                     return                           # removed by the user
+                if jid in _pausing:                  # user pressed Pause — hold the .part
+                    _pausing.discard(jid)
+                    _set(jid, state="paused", speed=0)
+                    return
                 if not _vpn_ok():
-                    _set(jid, state="paused")
+                    _set(jid, state="vpn_wait", speed=0)   # auto-park; resume_paused re-queues on VPN return
                     _wake.set()
                     return
                 buf = resp.read(CHUNK)
@@ -339,9 +384,10 @@ def _fetch(j):
 
 
 def resume_paused():
-    """Called by the app's VPN monitor when the tunnel comes back."""
+    """Called by the app's VPN monitor when the tunnel comes back. Re-queues ONLY the jobs the
+    tunnel parked (vpn_wait) — never a job the user paused on purpose (paused)."""
     with _lock:
         for j in _jobs.values():
-            if j.get("state") == "paused":
+            if j.get("state") == "vpn_wait":
                 j["state"] = "queued"
     _wake.set()

@@ -562,12 +562,24 @@ def usenet_snapshot():
     if not SAB_APIKEY:
         return out
     q = _sab_api("queue").get("queue", {}) or {}
+    try:
+        kbps = float(q.get("kbpersec") or 0)          # whole-queue download speed
+    except (TypeError, ValueError):
+        kbps = 0.0
     for s in (q.get("slots") or []):
         try:
             pct = float(s.get("percentage") or 0)
         except (TypeError, ValueError):
             pct = 0.0
         paused = str(s.get("status", "")).lower() == "paused"
+        try:
+            mbleft = float(s.get("mbleft") or 0)
+        except (TypeError, ValueError):
+            mbleft = 0.0
+        # Compute ETA ourselves in SECONDS from bytes-left ÷ live speed. SABnzbd's own
+        # `timeleft` string balloons to nonsense (e.g. 66:45:45:43) when the speed is ~0 at
+        # the start; a clean seconds value the UI formats is reliable. -1 = unknown.
+        eta = int(mbleft * 1024 / kbps) if (kbps > 0 and not paused and mbleft > 0) else -1
         out.append({
             "id": s.get("nzo_id", ""),
             "name": s.get("filename") or s.get("nzo_id") or "(usenet)",
@@ -575,7 +587,8 @@ def usenet_snapshot():
             "progress": round(pct, 1),
             "state": "Paused" if paused else "Downloading",
             "paused": paused,
-            "eta": s.get("timeleft") or "",
+            "eta": eta,
+            "speed": int(kbps * 1024) if not paused else 0,
             "size": s.get("size") or "",
             "done": False,
         })
@@ -591,14 +604,14 @@ def usenet_snapshot():
                             "cat": s.get("category") or "other",
                             "progress": 0, "state": "Failed",
                             "error": (s.get("fail_message") or "")[:160],
-                            "paused": False, "eta": "", "size": s.get("size") or "",
+                            "paused": False, "eta": -1, "size": s.get("size") or "",
                             "done": True})
             continue
         out.append({"id": s.get("nzo_id", ""),
                     "name": s.get("name") or "(usenet)",
                     "cat": s.get("category") or "other",
                     "progress": 100, "state": st or "Processing",
-                    "paused": False, "eta": "", "size": s.get("size") or "",
+                    "paused": False, "eta": -1, "size": s.get("size") or "",
                     "done": False})
     return out
 
@@ -611,6 +624,14 @@ def usenet_remove(nzo_id, delete_files=False):
     r1 = _sab_api("queue", {"name": "delete", "value": nzo_id, "del_files": d})
     r2 = _sab_api("history", {"name": "delete", "value": nzo_id, "del_files": d})
     return bool(r1.get("status") or r2.get("status"))
+
+
+def usenet_pause(nzo_id, resume=False):
+    """Pause or resume a single queued usenet job (SABnzbd per-item queue control)."""
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", nzo_id or ""):
+        return False
+    r = _sab_api("queue", {"name": "resume" if resume else "pause", "value": nzo_id})
+    return bool(r.get("status"))
 
 
 def remove(ih, delete_files=False):
@@ -836,6 +857,10 @@ def snapshot():
             "peers": s.num_peers,
             "size": s.total_wanted,
             "done": s.total_done,
+            # seconds remaining from bytes-left ÷ live rate; -1 = unknown (paused/stalled/done)
+            "eta": (int((s.total_wanted - s.total_done) / s.download_rate)
+                    if (s.download_rate > 0 and not s.paused and not s.is_finished
+                        and s.total_wanted > s.total_done) else -1),
         })
     return out
 
@@ -1879,6 +1904,11 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 </div><script>
 function fmt(b){if(b<1024)return b+' B';let u=['KB','MB','GB','TB'],i=-1;do{b/=1024;i++}while(b>=1024&&i<3);return b.toFixed(1)+' '+u[i]}
 function rate(b){return b>0?fmt(b)+'/s':'—'}
+// Seconds -> human time with proper carry (days/hours/minutes/seconds); '' when unknown (<=0).
+// Replaces the raw indexer/SAB string that could read nonsense like 66:45:45:43.
+function fmtEta(s){s=parseInt(s,10);if(!(s>0)||s>=8640000)return '';
+  var d=Math.floor(s/86400);s-=d*86400;var h=Math.floor(s/3600);s-=h*3600;var m=Math.floor(s/60);var sec=s-m*60;
+  if(d>0)return '~'+d+'d '+h+'h left';if(h>0)return '~'+h+'h '+m+'m left';if(m>0)return '~'+m+'m '+sec+'s left';return '~'+sec+'s left';}
 let VPN=false;
 async function add(e){e.preventDefault();if(!VPN)return;let m=document.getElementById('m');if(!m.value.trim())return;
 await fetch('/add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'magnet='+encodeURIComponent(m.value.trim())+'&cat='+document.getElementById('cat').value});m.value='';tick()}
@@ -2077,14 +2107,16 @@ if(!TOT){L.innerHTML='';return}
 // Direct file downloads (open directories, archive mirrors) — same list, same look.
 var dh=DR.map(u=>{var failed=u.state==='Failed';var done=u.state==='Done';
 var col=failed?'#f85149':(done?'#3fb950':(u.paused?'#8b949e':'#238636'));
-var acts='<button class=sec onclick="directDel(\''+u.id+'\',0)">✕ Remove</button>'+
-         (done?'':'<button class=sec onclick="directDel(\''+u.id+'\',1)">🗑 Remove + delete file</button>');
+var acts=(u.pausable?(u.paused?'<button class=sec title="resume this download" onclick="directPR(\''+u.id+'\',\'resume\')">▶ Resume</button>':'<button class=sec title="pause; the partial file is kept and resumes where it left off" onclick="directPR(\''+u.id+'\',\'pause\')">⏸ Pause</button>'):(u.paused?'<button class=sec title="resume this download" onclick="directPR(\''+u.id+'\',\'resume\')">▶ Resume</button>':''))+
+         '<button class=sec title="stop and remove from the list (the partial file is discarded)" onclick="directDel(\''+u.id+'\',0)">✕ Remove</button>'+
+         (done?'':'<button class=sec title="remove and delete the partial file" onclick="directDel(\''+u.id+'\',1)">🗑 Remove + delete file</button>');
 return '<div class=t><div class=tn>'+esc(u.name)+'</div>'+
 '<div class=bar><div class=fill style="width:'+u.progress+'%;background:'+col+'"></div></div>'+
 '<div class=meta><span class=tag>direct</span><span class=tag>'+esc(u.cat)+'</span>'+
 '<span>'+u.progress+'% · '+esc(u.state)+'</span>'+
 (u.size?'<span>'+esc(String(u.size))+'</span>':'')+
-(u.speed?'<span>'+fmt(u.speed)+'/s</span>':'')+
+(u.speed?'<span>↓ '+fmt(u.speed)+'/s</span>':'')+
+(fmtEta(u.eta)?'<span>'+fmtEta(u.eta)+'</span>':'')+
 (u.host?'<span style="color:#8b949e">'+esc(u.host)+'</span>':'')+
 (u.error?'<span style="color:#f85149">'+esc(u.error)+'</span>':'')+
 '</div><div class=acts>'+acts+'</div></div>';}).join('');
@@ -2092,14 +2124,16 @@ return '<div class=t><div class=tn>'+esc(u.name)+'</div>'+
 // invisible here — "added" and then nothing — so render them in the same list.
 var uh=UN.map(u=>{var failed=u.state==='Failed';
 var col=failed?'#f85149':(u.paused?'#8b949e':'#238636');
-var acts='<button class=sec onclick="nzbDel(\''+u.id+'\',0)">✕ Remove</button>'+
-         '<button class=sec onclick="nzbDel(\''+u.id+'\',1)">🗑 Remove + delete files</button>';
+var acts=(u.done||failed?'':(u.paused?'<button class=sec title="resume this download" onclick="nzbPR(\''+u.id+'\',\'resume\')">▶ Resume</button>':'<button class=sec title="pause this download (keeps its place in the queue)" onclick="nzbPR(\''+u.id+'\',\'pause\')">⏸ Pause</button>'))+
+         '<button class=sec title="stop and remove this job" onclick="nzbDel(\''+u.id+'\',0)">✕ Remove</button>'+
+         '<button class=sec title="remove and delete any downloaded files" onclick="nzbDel(\''+u.id+'\',1)">🗑 Remove + delete files</button>';
 return '<div class=t><div class=tn>'+esc(u.name)+'</div>'+
 '<div class=bar><div class=fill style="width:'+u.progress+'%;background:'+col+'"></div></div>'+
 '<div class=meta><span class=tag>usenet</span><span class=tag>'+esc(u.cat)+'</span>'+
 '<span>'+u.progress+'% · '+esc(u.state)+'</span>'+
 (u.size?'<span>'+esc(String(u.size))+'</span>':'')+
-(u.eta?'<span>ETA '+esc(u.eta)+'</span>':'')+
+(u.speed?'<span>↓ '+fmt(u.speed)+'/s</span>':'')+
+(fmtEta(u.eta)?'<span>'+fmtEta(u.eta)+'</span>':'')+
 (u.error?'<span style="color:#f85149">'+esc(u.error)+'</span>':'')+
 '</div><div class=acts>'+acts+'</div></div>';}).join('');
 L.innerHTML=dh+uh+d.torrents.map(t=>{let done=t.finished;let col=done?'#3fb950':(t.state[0]=='P'?'#8b949e':'#238636');
@@ -2111,8 +2145,10 @@ b+=`<button class=sec onclick="del('${t.ih}')">✕ Remove</button>`;
 return `<div class=t><div class=tn>${esc(t.name)}</div>
 <div class=bar><div class=fill style="width:${t.progress}%;background:${col}"></div></div>
 <div class=meta><span class=tag>${t.cat}</span><span>${t.progress}% · ${t.state}</span>
-<span>${fmt(t.done)} / ${fmt(t.size)}</span><span>↓ ${rate(t.dl)}</span><span>${t.peers} peers</span></div>
+<span>${fmt(t.done)} / ${fmt(t.size)}</span><span>↓ ${rate(t.dl)}</span><span>${t.peers} peers</span>${fmtEta(t.eta)?('<span>'+fmtEta(t.eta)+'</span>'):''}</div>
 <div class=acts>${b}</div></div>`}).join('')}
+async function nzbPR(id,act){try{await fetch('/nzb/'+act+'?id='+encodeURIComponent(id),{method:'POST'});}catch(e){}tick();}
+async function directPR(id,act){try{await fetch('/direct/'+act+'?id='+encodeURIComponent(id),{method:'POST'});}catch(e){}tick();}
 async function directDel(id,withFiles){
   if(withFiles && !confirm('Remove this download AND delete its file?'))return;
   try{var r=await fetch('/direct/remove?id='+encodeURIComponent(id)+'&delete='+(withFiles?1:0),{method:'POST'});
@@ -3595,12 +3631,23 @@ class H(BaseHTTPRequestHandler):
             dele = (qs.get("delete") or ["0"])[0] == "1"
             self._send(200, json.dumps({"ok": usenet_remove(nid, dele)}),
                        "application/json")
+        elif path in ("/nzb/pause", "/nzb/resume"):
+            # pause / resume a single usenet job
+            nid = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+            ok = usenet_pause(nid, resume=path.endswith("resume"))
+            self._send(200, json.dumps({"ok": ok}), "application/json")
         elif path == "/direct/remove":
             # cancel / forget a direct download (optionally deleting its file)
             qs = parse_qs(urlparse(self.path).query)
             did = (qs.get("id") or [""])[0]
             dele = (qs.get("delete") or ["0"])[0] == "1"
             ok = bool(fetcher and re.fullmatch(r"d-[0-9a-f]+-[0-9a-f]+", did or "") and fetcher.remove(did, dele))
+            self._send(200, json.dumps({"ok": ok}), "application/json")
+        elif path in ("/direct/pause", "/direct/resume"):
+            # pause / resume a direct download
+            did = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+            valid = bool(fetcher and re.fullmatch(r"d-[0-9a-f]+-[0-9a-f]+", did or ""))
+            ok = bool(valid and (fetcher.resume(did) if path.endswith("resume") else fetcher.pause(did)))
             self._send(200, json.dumps({"ok": ok}), "application/json")
         elif path == "/pause":
             pause(self._ih())
