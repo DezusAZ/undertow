@@ -1353,10 +1353,39 @@ def _norm(r):
     }
 
 
-def meta_search(q, category=""):
-    """Query Jackett trackers AND every external adapter concurrently, merge,
-    dedupe, and rank. Returns {"ready": bool, "results": [...]}. 'ready' is False
-    only when nothing at all is available yet (Jackett still warming, no adapters)."""
+def _query_variants(q, maxn=3):
+    """A few HIGH-VALUE spellings of a query to run in parallel and merge, so a result isn't
+    missed over a punctuation/accent difference. The big one: release names drop apostrophes
+    ("Margo's" is on disk as "Margos"), and indexers tokenise punctuation differently. Also
+    normalises curly quotes/dashes, folds accents (Sigur Rós -> Sigur Ros) and expands & -> and.
+    A plain query with no punctuation/accents returns just itself (one query, no extra load).
+    Capitalisation is NOT varied — indexers are case-insensitive, so it would only waste queries."""
+    q = re.sub(r"\s+", " ", (q or "")).strip()
+    if not q:
+        return []
+    out, seen = [q], {q.lower()}
+
+    def add(v):
+        v = re.sub(r"\s+", " ", (v or "")).strip()
+        if v and v.lower() not in seen and len(out) < maxn:
+            out.append(v)
+            seen.add(v.lower())
+
+    base = (q.replace("’", "'").replace("‘", "'").replace("“", '"')
+             .replace("”", '"').replace("–", "-").replace("—", "-"))
+    folded = "".join(c for c in unicodedata.normalize("NFKD", base)
+                     if not unicodedata.combining(c))          # Rós -> Ros
+    if "&" in folded:                                          # & -> and (do first: highest value)
+        add(re.sub(r"\s*&\s*", " and ", folded))
+    add(re.sub(r"[^\w\s]", "", folded))                       # punctuation removed: Margo's -> Margos
+    add(re.sub(r"[^\w\s]", " ", folded))                      # punctuation -> space: Margo's -> Margo s
+    add(folded)                                                # accent/quote-normalised only
+    return out[:maxn]
+
+
+def _fetch_rows(q, category=""):
+    """Run ONE query across Jackett + every adapter concurrently; return (normalized rows,
+    jackett_answered). The unit the variant fan-out in meta_search repeats and pools."""
     jk, ext = None, []
     with ThreadPoolExecutor(max_workers=2) as ex:
         f_jk = ex.submit(jackett_search, q)
@@ -1370,8 +1399,33 @@ def meta_search(q, category=""):
                 ext = f_ext.result(timeout=SEARCH_DEADLINE + 6) or []
             except Exception:
                 ext = []
-    qterms = _query_terms(q)
-    rows = [_norm(r) for r in (jk or [])] + [_norm(r) for r in ext]
+    return [_norm(r) for r in (jk or [])] + [_norm(r) for r in ext], (jk is not None)
+
+
+def meta_search(q, category=""):
+    """Query Jackett trackers AND every external adapter concurrently, merge, dedupe, and rank.
+    The query is auto-expanded into a few punctuation/accent variants (see _query_variants) run
+    in parallel, so a result isn't lost to a slight spelling difference — "Margo's" also fetches
+    "Margos". Returns {"ready": bool, "results": [...]}. 'ready' is False only when nothing at
+    all is available yet (Jackett still warming, no adapters)."""
+    variants = _query_variants(q)
+    ready = False
+    if len(variants) <= 1:
+        rows, ready = _fetch_rows(q, category)
+    else:
+        # Run the variants concurrently and pool every row; the dedupe below collapses the
+        # copies a variant shares with the original (same infohash), so merging is free.
+        rows = []
+        with ThreadPoolExecutor(max_workers=len(variants)) as ex:
+            futs = [ex.submit(_fetch_rows, v, category) for v in variants]
+            for f in futs:
+                try:
+                    rr, rdy = f.result(timeout=SEARCH_DEADLINE + 10)
+                    rows += rr
+                    ready = ready or rdy
+                except Exception:
+                    pass
+    qterms = _query_terms(q)                              # rank against what the USER typed
     best = {}
     for r in rows:
         k = (_infohash_of(r["magnet"]) or r["torrent_url"]
@@ -1414,7 +1468,7 @@ def meta_search(q, category=""):
         if cand:
             rows, scoped = cand, True
     out = sorted(rows, key=lambda r: _score(r, qterms), reverse=True)[:300]
-    ready = (jk is not None) or bool(out)
+    ready = ready or bool(out)
     return {"ready": ready, "results": out, "scoped": scoped}
 
 
@@ -1542,6 +1596,19 @@ form.add,form.search{display:flex;gap:10px;margin:14px 0;flex-wrap:wrap}
 input[type=text],select{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);padding:12px 14px;outline:none;transition:.18s var(--ease)}
 input[type=text]{flex:1;min-width:220px}
 input[type=text]:focus,select:focus,.lib-search:focus{border-color:rgba(52,221,125,.45);box-shadow:0 0 0 3px rgba(52,221,125,.14)}
+.qwrap{position:relative;flex:1;min-width:220px;display:flex}
+.qwrap>input[type=text]{flex:1;min-width:0}
+.qsug{position:absolute;top:calc(100% + 5px);left:0;right:0;z-index:50;background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);box-shadow:0 10px 30px rgba(0,0,0,.4);overflow:hidden;max-height:44vh;overflow-y:auto}
+.qsug .qs{display:flex;align-items:center;gap:9px;padding:9px 12px;cursor:pointer;font-size:13.5px;border-bottom:1px solid rgba(255,255,255,.05)}
+.qsug .qs:last-child{border-bottom:0}
+.qsug .qs:hover,.qsug .qs.sel{background:rgba(52,221,125,.12)}
+.qsug .qs .qtxt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.qsug .qs .qtxt .hl{color:#3fb950;font-weight:600}
+.qsug .qs .qcat{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:0 0 auto}
+.qsug .qs .qdel{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:3px 5px;border-radius:5px;flex:0 0 auto}
+.qsug .qs .qdel:hover{color:#f85149;background:rgba(248,81,73,.12)}
+.qsug .qhint{padding:6px 12px;font-size:11px;color:var(--muted);display:flex;justify-content:space-between;gap:10px;background:rgba(255,255,255,.02)}
+.qsug .qhint span{cursor:pointer}.qsug .qhint span:hover{color:var(--text)}
 input::placeholder{color:var(--faint)}
 #q,#sq{padding-left:42px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235f7568' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.2-3.2'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:left 13px center;background-size:18px}
 select{cursor:pointer;padding-right:34px;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%238aa89a' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center}
@@ -1726,7 +1793,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 </div>
 <div id=tab-search class=tab-panel>
 <form class=search onsubmit="search(event)">
-<input type=text id=q placeholder="search for movies, shows, music, anything…" autocomplete=off title="Keywords work best: title + year, artist + album, or a release-style name. Results merge 100+ indexers, Usenet, our DHT crawler and open repositories, ranked by relevance and how downloadable they are. For something a search can't find, use 🔦 Deep Hunt.">
+<span class=qwrap><input type=text id=q placeholder="search for movies, shows, music, anything…" autocomplete=off oninput="renderQSug()" onfocus="renderQSug()" onkeydown="qSugKey(event)" onblur="setTimeout(qSugHide,170)" title="Keywords work best: title + year, artist + album, or a release-style name. Punctuation is auto-expanded (Margo's also fetches Margos). Results merge 100+ indexers, Usenet, our DHT crawler and open repositories, ranked by relevance and how downloadable they are. For something a search can't find, use 🔦 Deep Hunt."><div id=qsug class=qsug hidden></div></span>
 <select id=cat title="Narrows the sources and picks the download folder (Documents = papers, books, scans; Software = apps, ISOs, code).">__OPTS__</select>
 <button type=button id=aibtn class=aibtn hidden onclick="smartSearch()" title="Ask in plain English — the local AI picks the keywords + category">✨ AI</button>
 <button id=go title="Search every source at once (takes ~10-15 s). No VPN = no downloads, but searching still works.">Search</button></form>
@@ -1906,9 +1973,45 @@ btn.textContent='✨ Explained';}
 catch(e){var box2=document.getElementById('aibox'+i);
   if(box2){box2.textContent='Could not reach the AI: '+(e&&e.message?e.message:e);box2.hidden=false;}
   btn.disabled=false;btn.textContent='✨ Explain';}}
+// --- search history (per-device, in this browser's localStorage; never leaves the machine) ---
+var HIST_KEY='vt_search_hist',HIST_MAX=60,_qsugList=[],_qsel=-1;
+function histLoad(){try{var a=JSON.parse(localStorage.getItem(HIST_KEY)||'[]');return Array.isArray(a)?a:[];}catch(e){return[];}}
+function histSave(a){try{localStorage.setItem(HIST_KEY,JSON.stringify(a.slice(0,HIST_MAX)));}catch(e){}}
+function histAdd(q,cat){q=(q||'').trim();if(!q)return;var a=histLoad().filter(function(x){return (x.q||'').toLowerCase()!==q.toLowerCase();});a.unshift({q:q,cat:cat||'all',ts:Date.now()});histSave(a);}
+function histDelete(q){histSave(histLoad().filter(function(x){return (x.q||'').toLowerCase()!==(q||'').toLowerCase();}));renderQSug();}
+function histClear(){if(confirm('Clear your whole search history on this device?'))histSave([]);renderQSug();}
+function qSuggest(prefix){var p=(prefix||'').trim().toLowerCase(),a=histLoad();
+  if(!p)return a.slice(0,8);
+  var starts=a.filter(function(x){return (x.q||'').toLowerCase().indexOf(p)===0;});
+  var contains=a.filter(function(x){return (x.q||'').toLowerCase().indexOf(p)>0;});
+  return starts.concat(contains).slice(0,8);}
+function _qhl(text,prefix){var t=String(text),p=(prefix||'').trim();if(!p)return esc(t);
+  var i=t.toLowerCase().indexOf(p.toLowerCase());if(i<0)return esc(t);
+  return esc(t.slice(0,i))+'<span class=hl>'+esc(t.slice(i,i+p.length))+'</span>'+esc(t.slice(i+p.length));}
+function renderQSug(){var box=document.getElementById('qsug'),inp=document.getElementById('q');if(!box||!inp)return;
+  _qsugList=qSuggest(inp.value);_qsel=-1;
+  if(!_qsugList.length){box.hidden=true;box.innerHTML='';return;}
+  var pfx=inp.value;
+  box.innerHTML=_qsugList.map(function(x,i){return '<div class=qs onmousedown="qSugPick(event,'+i+')"><span class=qtxt>'+_qhl(x.q,pfx)+'</span>'+((x.cat&&x.cat!=='all')?'<span class=qcat>'+esc(x.cat)+'</span>':'')+'<button type=button class=qdel title="remove from history" onmousedown="qSugDel(event,'+i+')">✕</button></div>';}).join('')
+    +'<div class=qhint><span onmousedown="qSugClear(event)">Clear history</span><span style="cursor:default;color:var(--muted)">↑↓ to pick · saved on this device</span></div>';
+  box.hidden=false;}
+function qSugPick(e,i){e.preventDefault();var x=_qsugList[i];if(!x)return;document.getElementById('q').value=x.q;
+  var sel=document.getElementById('cat');if(sel&&x.cat){for(var k=0;k<sel.options.length;k++){if(sel.options[k].value===x.cat){sel.selectedIndex=k;break;}}}
+  qSugHide();search(new Event('submit'));}
+function qSugDel(e,i){e.preventDefault();e.stopPropagation();var x=_qsugList[i];if(x)histDelete(x.q);}
+function qSugClear(e){e.preventDefault();histClear();}
+function qSugHide(){var b=document.getElementById('qsug');if(b)b.hidden=true;}
+function _qsugHi(){var box=document.getElementById('qsug');if(!box)return;var rows=box.querySelectorAll('.qs');for(var i=0;i<rows.length;i++)rows[i].classList.toggle('sel',i===_qsel);}
+function qSugKey(e){var box=document.getElementById('qsug');if(!box||box.hidden||!_qsugList.length)return;var n=_qsugList.length;
+  if(e.key==='ArrowDown'){e.preventDefault();_qsel=(_qsel+1)%n;_qsugHi();}
+  else if(e.key==='ArrowUp'){e.preventDefault();_qsel=(_qsel-1+n)%n;_qsugHi();}
+  else if(e.key==='Enter'&&_qsel>=0){qSugPick(e,_qsel);}
+  else if(e.key==='Escape'){qSugHide();}}
 async function search(e){e.preventDefault();let q=document.getElementById('q').value.trim();if(!q||!VPN)return;
+qSugHide();
 let el=document.getElementById('results');el.innerHTML='<div class=empty>Searching dozens of sources…</div>';
 let cat=document.getElementById('cat').value;
+histAdd(q,cat);
 let r=await fetch('/search?q='+encodeURIComponent(q)+'&cat='+encodeURIComponent(cat));if(r.status==401){location.href='/login';return}
 let d=await r.json();
 if(!d.ready){el.innerHTML='<div class=empty>Search engine is still starting up — give it a minute and try again.</div>';return}
