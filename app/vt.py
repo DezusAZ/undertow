@@ -1856,9 +1856,24 @@ async function ensureAiReady(cb){
   }
   return false;
 }
+// Stronger than ensureAiReady: 'reachable' isn't enough — the MODEL must be resident in VRAM
+// (state==='ready') or the first call blocks 60-90s while it loads, with no visible progress.
+// Returns true when loaded (instantly if already warm), driving cb(seconds) while it's cold.
+async function ensureAiLoaded(cb){
+  try{var s0=await (await fetch('/ai/status')).json();if(s0.state==='ready'){AI_READY=true;return true;}
+      if(s0.enabled===false)return false;}catch(e){}
+  try{await fetch('/ai/wake',{method:'POST'});}catch(e){}
+  var t0=Date.now();
+  while(Date.now()-t0<170000){
+    if(cb)cb(Math.round((Date.now()-t0)/1000));
+    try{var s=await (await fetch('/ai/status')).json();if(s.state==='ready'){AI_READY=true;return true;}}catch(e){}
+    await new Promise(function(r){setTimeout(r,2000);});
+  }
+  return false;
+}
 async function smartSearch(){var q=document.getElementById('q').value.trim();if(!q||!VPN)return;
 var note=document.getElementById('ainote');note.hidden=false;
-if(!AI_READY){var ok=await ensureAiReady(function(secs){note.innerHTML='✨ Waking the local AI — loading the model on the GPU… <b>'+secs+'s</b> <span style="color:#8b949e">(first run from cold can take ~60–90s; instant afterwards)</span>';});
+{var ok=await ensureAiLoaded(function(secs){note.innerHTML='✨ Waking the local AI — loading the model on the GPU… <b>'+secs+'s</b> <span style="color:#8b949e">(first run from cold can take ~60–90s; instant afterwards)</span>';});
   if(!ok){note.textContent='✨ AI didn’t come up in time — searching your text as-is.';search(new Event('submit'));return;}}
 note.textContent='✨ AI is interpreting your request…';
 try{var r=await fetch('/ai/smart',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:q})});var s=await r.json();
@@ -1867,9 +1882,13 @@ note.innerHTML='✨ Interpreted as “<b>'+esc(s.query)+'</b>” in <b>'+esc(s.c
 else{note.textContent='✨ AI unavailable — searching your text as-is.';}}catch(e){note.textContent='✨ AI unavailable — searching your text as-is.';}
 search(new Event('submit'));}
 async function explainResult(i,btn){var t=R[i];btn.disabled=true;btn.textContent='✨ …';
-if(!AI_READY){var ok=await ensureAiReady(function(secs){btn.textContent='✨ waking '+secs+'s';});
-  if(!ok){btn.disabled=false;btn.textContent='✨ Explain';return;}
-  btn.textContent='✨ …';}
+var box0=document.getElementById('aibox'+i);
+// The AI runs on demand: a cold click has to load the model on the GPU (~60-90s). Show a live
+// countdown instead of a frozen "✨ …", so it never looks like nothing happened.
+var ok=await ensureAiLoaded(function(secs){btn.textContent='✨ waking '+secs+'s';});
+if(!ok){if(box0){box0.textContent='The local AI didn’t come up in time — give it a moment and try again (Engines → Local AI shows its state).';box0.hidden=false;}
+  btn.disabled=false;btn.textContent='✨ Explain';return;}
+btn.textContent='✨ thinking…';
 try{var ctx=(t.source?('Source: '+t.source):'')+(t.category?(' · Type: '+t.category):'')+(t.size?(' · '+fmt(t.size)):'');
 var r=await fetch('/ai/explain',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t.title,context:ctx})});
 var box=document.getElementById('aibox'+i);
