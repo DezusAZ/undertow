@@ -119,27 +119,33 @@ def brain_status():
     failing = bool(st.get("calls")) and st.get("last_fail_ts", 0) > st.get("last_ok_ts", 0)
     gated = enabled and gpu and not busy
     using = gated and reachable and not failing
-    # Ollama is started ON DEMAND by the watchdog when a hunt exists: for the first few minutes
-    # of the first hunt after idle "unreachable" just means "still booting the model" — say so,
-    # and only call it dead once it has stayed down for a while with hunts waiting on it.
-    waking = False
+    # Ollama runs ON DEMAND: the watchdog powers it off when nothing's using it, and starts it
+    # the moment a hunt exists (or the app asks). So "not reachable" is usually the EXPECTED
+    # idle state, not a fault:
+    #   - no hunt running and not recently woken  -> "asleep" (calm: it starts with a hunt)
+    #   - a hunt is waiting / it was just woken, within the cold-start grace -> "waking"
+    #   - still down past the grace with a hunt waiting on it -> "unreachable" (a real problem)
+    waking = asleep = False
+    global _unreach_since
     if enabled and not reachable:
         try:
             active = any(x.get("status") in ("running", "idle") for x in hunt.list_hunts())
         except Exception:
             active = False
-        global _unreach_since
         if active or ai.wake_fresh():
             if not _unreach_since:
                 _unreach_since = time.time()
-            waking = (time.time() - _unreach_since) < _WAKE_GRACE_S
+            if time.time() - _unreach_since < _WAKE_GRACE_S:
+                waking = True          # cold start in progress
+            # else: fall through to "unreachable" — genuinely not coming up
         else:
             _unreach_since = 0.0
+            asleep = True              # powered down on purpose; a hunt will wake it
     elif reachable:
         _unreach_since = 0.0
-    reason = ("ai-off" if not enabled else "waking" if waking else "unreachable" if not reachable
-              else "gpu-not-ready" if not gpu else "box-busy" if busy
-              else "failing" if failing else "active")
+    reason = ("ai-off" if not enabled else "asleep" if asleep else "waking" if waking
+              else "unreachable" if not reachable else "gpu-not-ready" if not gpu
+              else "box-busy" if busy else "failing" if failing else "active")
     last = None
     try:
         if _last_llm_ts:
