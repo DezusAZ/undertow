@@ -199,7 +199,8 @@ def _rd_submit(magnet, key):
 
 
 def _rd_links_when_ready(tid, key, deadline):
-    """Poll RD torrent info; when downloaded, unrestrict each link to a direct URL."""
+    """Poll RD torrent info; when downloaded, unrestrict each link to a direct URL.
+    Returns [(direct_url, filename, size_bytes), ...]."""
     while time.time() < deadline:
         info = _req("GET", _RD + "/torrents/info/" + tid, key, timeout=20)
         status = (info.get("status") or "").lower()
@@ -211,7 +212,7 @@ def _rd_links_when_ready(tid, key, deadline):
                              form={"link": link}, timeout=25)
                     dl = u.get("download")
                     if dl:
-                        out.append((dl, u.get("filename") or ""))
+                        out.append((dl, u.get("filename") or "", int(u.get("filesize") or 0)))
                 except Exception:
                     pass
             return out
@@ -268,7 +269,8 @@ def _tb_links_when_ready(tid, key, deadline):
                     rd = rr.get("data")
                     dl = rd if isinstance(rd, str) else (rd.get("url") if isinstance(rd, dict) else None)
                     if dl:
-                        out.append((dl, f.get("short_name") or f.get("name") or ""))
+                        out.append((dl, f.get("short_name") or f.get("name") or "",
+                                    int(f.get("size") or 0)))
                 except Exception:
                     pass
             if out:
@@ -395,7 +397,7 @@ def submit(magnet, cat="other", name=None, max_wait=600):
                 _set_pending(pid, state="failed", error="no download links")
                 return
             n = 0
-            for url, fname in links:
+            for url, fname, _size in links:
                 try:
                     _fetch_add(url, cat, fname or name)
                     n += 1
@@ -408,6 +410,41 @@ def submit(magnet, cat="other", name=None, max_wait=600):
 
     threading.Thread(target=_bg, name="debrid-" + pid, daemon=True).start()
     return {"ok": True, "id": pid, "provider": provider, "state": "caching"}
+
+
+_VIDEO_EXT = (".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".webm", ".flv", ".mpg", ".mpeg")
+
+
+def _best_video(links):
+    """From [(url, filename, size), ...] pick the main video file: the largest file with a
+    video extension, else the largest file overall, else the first. links is non-empty."""
+    vids = [l for l in links if (l[1] or "").lower().endswith(_VIDEO_EXT)]
+    pool = vids or links
+    return max(pool, key=lambda l: l[2] or 0)
+
+
+def resolve_for_stream(magnet, max_wait=120):
+    """Resolve a magnet to a single direct URL for its main video file, for STREAMING.
+    Blocks (streaming waits on it): fast when the provider has it cached, up to max_wait
+    otherwise. Returns {url, filename, size}. Raises if debrid isn't active or it can't be
+    made ready in time (caller should suggest Download instead)."""
+    c = _load()
+    if not active():
+        raise RuntimeError("debrid not configured")
+    provider, key = c["provider"], c["key"]
+    deadline = time.time() + max_wait
+    if provider == RD:
+        tid = _rd_submit(magnet, key)
+        links = _rd_links_when_ready(tid, key, deadline)
+    else:
+        tid = _tb_submit(magnet, key)
+        links = _tb_links_when_ready(tid, key, deadline)
+    if not links:
+        raise RuntimeError("no streamable file in that torrent")
+    url, fname, size = _best_video(links)
+    if not url:
+        raise RuntimeError("could not resolve a direct link")
+    return {"url": url, "filename": fname or "video", "size": int(size or 0)}
 
 
 def test(provider=None, key=None):

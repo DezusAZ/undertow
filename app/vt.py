@@ -78,6 +78,10 @@ try:
 except Exception:
     debrid = None
 try:
+    import stream  # local module: Stremio-style streaming from debrid via the sandboxed NVENC HLS transcoder
+except Exception:
+    stream = None
+try:
     import ai  # local module: optional local-AI (Ollama) features — off by default
 except Exception:
     ai = None
@@ -2162,6 +2166,8 @@ async function liveCheck(gen){
 }
 var AI_ON=false,AI_READY=false;
 async function refreshAi(){try{var r=await fetch('/ai/status');var s=await r.json();AI_ON=!!s.enabled;AI_READY=!!s.reachable;var b=document.getElementById('aibtn');if(b)b.hidden=!AI_ON;}catch(e){AI_ON=false;AI_READY=false;}}
+var DEBRID_ON=false;
+async function refreshDebrid(){try{var s=await (await fetch('/debrid/settings')).json();DEBRID_ON=!!s.active;}catch(e){DEBRID_ON=false;}}
 // On-demand GPU: if the AI is asleep, wake it and wait for it to come up, reporting progress via
 // cb(seconds). Returns true once reachable, false on timeout. Model loads on the GPU on first use.
 async function ensureAiReady(cb){
@@ -2286,12 +2292,13 @@ else if(t.url&&isFileUrl(t)){act='<button class=sec onclick="dlUrl(R['+i+'],this
 else if(t.url){act='<a class="sec" style="text-decoration:none" href="'+esc(t.url)+'" target=_blank rel=noopener>Open ↗</a>';}
 else{act='';}
 var xp=AI_ON?('<button class=aiexplain onclick="explainResult('+i+',this)">✨ Explain</button>'):'';
+var strm=(DEBRID_ON&&t.magnet)?('<button class=sec id=strm'+i+' onclick="openStream('+i+',this)" title="Stream now via debrid — play without keeping a full download">▶ Stream</button>'):'';
 return '<div class=t><div class=tn>'+esc(t.title)+'</div>'+
 '<div class=meta><span class=tag>'+esc(t.source||t.tracker)+'</span>'+typ+
 '<span style="color:'+seedCol+'">'+seedTxt+'</span>'+
 '<span id=live'+i+' style="font-weight:600" title="liveness — is this actually retrievable right now?"></span>'+
-(t.size?'<span>'+fmt(t.size)+'</span>':'')+qual+dt+xp+act+'</div>'+
-'<div class=aibox id=aibox'+i+' hidden></div></div>';}).join('');LIVE_GEN++;liveCheck(LIVE_GEN);}
+(t.size?'<span>'+fmt(t.size)+'</span>':'')+qual+dt+xp+strm+act+'</div>'+
+'<div class=aibox id=aibox'+i+' hidden></div></div>';}).join('');LIVE_GEN++;liveCheck(LIVE_GEN);streamCachedBadges();}
 async function dl(i,btn){var t=R[i];btn.disabled=true;
 // Say "Adding…" until the server actually confirms. This used to print "Added ✓"
 // before the request was even sent, so a rejected add — or a usenet job that never
@@ -2316,6 +2323,48 @@ try{
   }
 }catch(e){btn.disabled=false;btn.textContent='⚠ Retry';alert('Could not reach the server to add it.');}
 tick()}
+var _streamLocal=null;
+async function openStream(i,btn){
+  var t=R[i]; if(!t||!t.magnet)return;
+  if(!VPN){alert('VPN not connected — streaming is disabled until the tunnel is up.');return;}
+  if(btn){btn.disabled=true;btn.textContent='Starting…';}
+  var ov=document.getElementById('streamOverlay');
+  if(!ov){ov=document.createElement('div');ov.id='streamOverlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:10000;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px';
+    ov.innerHTML='<div style="width:100%;max-width:1100px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><div id=streamTitle style="color:#e6edf3;font-weight:600;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div><button class=sec onclick="closeStream()">✕ Close</button></div><div id=streamHolder style="background:#000;border-radius:10px;overflow:hidden;min-height:220px"></div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click',function(e){if(e.target===ov)closeStream();});
+  }
+  ov.style.display='flex';
+  document.getElementById('streamTitle').textContent=t.title||'Streaming';
+  var holder=document.getElementById('streamHolder');
+  holder.innerHTML='<div class="lib-prep" style="color:#e6edf3;padding:34px"><span class="lib-spin"></span> Resolving the stream via debrid…<br><small style="color:#8b949e">Cached titles start in seconds. If it isn’t cached yet, the provider fetches it first — that can take a while.</small></div>';
+  var body=JSON.stringify({magnet:t.magnet,cat:document.getElementById('cat').value,caps:'',tier:(localStorage.getItem('vt_tier')||'high')});
+  try{
+    var r=await hfetch('/dstream/start',{method:'POST',headers:{'Content-Type':'application/json'},body:body});
+    var h=await r.json();
+    if(!h||!h.ok||!h.sid){holder.innerHTML='<div class="lib-prep lib-prep-err" style="padding:34px">Couldn’t stream this: '+esc((h&&h.error)||'unknown')+'<br><small>Try <b>⬇ Download</b> instead.</small></div>';if(btn){btn.disabled=false;btn.textContent='▶ Stream';}return;}
+    _streamLocal=h.local;
+    _hlsCtx=null;           // not a Library item: stop the auto-downgrade from re-driving libPlay
+    libMountHls(holder,'video',h);
+  }catch(e){holder.innerHTML='<div class="lib-prep lib-prep-err" style="padding:34px">Could not reach the server.</div>';}
+  if(btn){btn.disabled=false;btn.textContent='▶ Stream';}
+}
+function closeStream(){
+  var ov=document.getElementById('streamOverlay');if(ov)ov.style.display='none';
+  try{libStopMedia();}catch(e){}
+  if(_streamLocal){var l=_streamLocal;_streamLocal=null;try{hfetch('/dstream/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({local:l})});}catch(e){}}
+}
+async function streamCachedBadges(){
+  if(!DEBRID_ON||!window.R||!R.length)return;
+  var mags=[];for(var i=0;i<R.length;i++){if(R[i].magnet)mags.push(R[i].magnet);}
+  if(!mags.length)return;
+  try{var r=await hfetch('/debrid/cached',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({magnets:mags.slice(0,60)})});
+    var j=await r.json();var c=(j&&j.cached)||{};
+    for(var i=0;i<R.length;i++){var b=document.getElementById('strm'+i);if(!b)continue;if(c[R[i].magnet]===true){b.textContent='▶ Stream ⚡';b.title='Cached on debrid — starts instantly';}}
+  }catch(e){}
+}
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var ov=document.getElementById('streamOverlay');if(ov&&ov.style.display!=='none')closeStream();}});
 async function tick(){let r=await fetch('/status');if(r.status==401){location.href='/login';return}let d=await r.json();
 VPN=d.vpn;let v=document.getElementById('vpn');
 if(d.vpn){v.className='vpn ok';v.innerHTML='<span><b>Protected</b> — traffic routed through the VPN · exit <code>'+esc(d.ip)+'</code></span>'}
@@ -3432,7 +3481,7 @@ function libEscKey(ev){
 
 let mq=new URLSearchParams(location.search).get('magnet');
 if(mq){document.querySelector('details').open=true;document.getElementById('m').value=decodeURIComponent(mq);history.replaceState({},'','/')}
-tick();setInterval(tick,1500);refreshAi();
+tick();setInterval(tick,1500);refreshAi();refreshDebrid();
 // Restore whatever tab the URL points at, so a refresh or a shared link lands where you
 // were instead of always resetting to Search.
 applyHash();
@@ -4172,6 +4221,45 @@ class H(BaseHTTPRequestHandler):
                            "application/json")
             else:
                 self._send(404, "not found")
+        elif path.startswith("/dstream/"):
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                n = -1
+            if not (0 <= n <= 65536):
+                self._send(400, "bad request"); return
+            try:
+                data = json.loads(self.rfile.read(n).decode() or "{}")
+            except Exception:
+                data = {}
+            if stream is None:
+                self._send(200, json.dumps({"ok": False, "error": "streaming unavailable"}),
+                           "application/json"); return
+            if path == "/dstream/start":
+                if not vpn_ok:
+                    self._send(403, json.dumps({"ok": False, "error": "VPN not connected"}),
+                               "application/json"); return
+                magnet = str(data.get("magnet") or "")[:4000]
+                if not magnet.startswith("magnet:"):
+                    self._send(400, json.dumps({"ok": False, "error": "a magnet is required to stream"}),
+                               "application/json"); return
+                cat = str(data.get("cat") or "other")[:40]
+                caps = str(data.get("caps") or "")[:120]
+                tier = str(data.get("tier") or "high")[:10]
+                try:
+                    r = stream.start(magnet, cat, caps, tier)
+                    self._send(200, json.dumps({"ok": True, **r}), "application/json")
+                except Exception as e:
+                    self._send(200, json.dumps({"ok": False, "error": str(e)[:200]}),
+                               "application/json")
+            elif path == "/dstream/stop":
+                self._send(200, json.dumps({"ok": stream.stop(str(data.get("local") or ""))}),
+                           "application/json")
+            elif path == "/dstream/status":
+                self._send(200, json.dumps(stream.status(str(data.get("local") or ""))),
+                           "application/json")
+            else:
+                self._send(404, "not found")
         elif path.startswith("/hunt/"):
             try:
                 n = int(self.headers.get("Content-Length", 0) or 0)
@@ -4267,6 +4355,13 @@ if __name__ == "__main__":
             debrid.start(fetch_add=fetcher.add, vpn_check=lambda: bool(vpn_ok))
         except Exception as e:
             print(f"[vpntorrent] debrid wiring failed: {e}", flush=True)
+    if stream is not None:
+        # streaming buffers live under <downloads>/.stream (sandbox reads them ro) and feed
+        # the existing NVENC HLS transcoder; configure sweeps any buffers a crash left behind.
+        try:
+            stream.configure(SAVE, TRANSCODER, vpn_check=lambda: bool(vpn_ok))
+        except Exception as e:
+            print(f"[vpntorrent] stream engine failed to configure: {e}", flush=True)
     if hunt is not None:
         # Inject the LLM brain (Phase 2). The brain itself checks whether AI is on and
         # falls back to hunt's deterministic stub when it isn't, so this is safe to wire
