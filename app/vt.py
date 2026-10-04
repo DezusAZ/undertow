@@ -74,6 +74,10 @@ try:
 except Exception:
     trackers = None
 try:
+    import debrid  # local module: optional Real-Debrid/TorBox — instant cached grabs via the direct-download engine; dormant until a key is set
+except Exception:
+    debrid = None
+try:
     import ai  # local module: optional local-AI (Ollama) features — off by default
 except Exception:
     ai = None
@@ -2096,6 +2100,7 @@ form.huntform{display:flex;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 <div id=themePick class=themepick></div>
 </div>
 <div id=vpnsettings></div>
+<div id=debridsettings></div>
 </div>
 <div id=tab-downloads class=tab-panel hidden>
 <div id=list></div>
@@ -2600,10 +2605,11 @@ async function loadVpnSettings(){var el=document.getElementById('vpnsettings');i
     +'<div class=row style="margin-top:8px"><button class=sec onclick="vpnAdd(this)">Add this VPN</button>'
     +'<span style="font-size:11.5px;color:var(--faint)">The private key stays on this box (saved 0600) and only ever reaches its own server through the tunnel.</span></div>'
     +'<div style="margin-top:14px;font-size:12.5px;color:var(--muted);line-height:1.6"><b style="color:var(--text)">Need a provider?</b> Reputable privacy VPNs that hand you WireGuard configs: '
-    +'<a href="https://protonvpn.com" target=_blank rel=noopener>Proton VPN</a> (has a real free tier), '
-    +'<a href="https://mullvad.net" target=_blank rel=noopener>Mullvad</a>, '
-    +'<a href="https://www.ivpn.net" target=_blank rel=noopener>IVPN</a>. '
-    +'Steer clear of random “free” VPNs — for a privacy tool they usually monetise your traffic, which is the opposite of the point.</div>'
+    +'<a href="https://protonvpn.com" target=_blank rel=noopener>Proton VPN</a> (has a real free tier, and supports port-forwarding on paid), '
+    +'<a href="https://airvpn.org" target=_blank rel=noopener>AirVPN</a> (port-forwarding — the best fit for torrents, more peers), '
+    +'<a href="https://mullvad.net" target=_blank rel=noopener>Mullvad</a> and '
+    +'<a href="https://www.ivpn.net" target=_blank rel=noopener>IVPN</a> (both great for privacy, but both dropped port-forwarding — downloads still work, just with fewer reachable peers). '
+    +'A free tier is fine for unblocking; a paid plan is usually faster and better for privacy. Whichever you pick, this tool fails closed — nothing leaves except through the tunnel.</div>'
     +'</div>';}
 function vpnMsg(m,bad){var e=document.getElementById('vpnMsg');if(e){e.textContent=m||'';e.style.color=bad?'#f85149':'#3fb950';}}
 function vpnPickFile(inp){var f=inp.files&&inp.files[0];if(!f)return;var r=new FileReader();
@@ -2626,6 +2632,56 @@ async function vpnSwitch(path,btn){if(!confirm('Switch the VPN to this config no
       if(Date.now()-t0<75000){setTimeout(poll,2000);} else {vpnMsg('Still working — check the status line above in a moment.',true);loadVpnSettings();}
     }).catch(function(){ if(Date.now()-t0<75000){setTimeout(poll,2500);} });   // app may restart mid-switch — keep polling through it
   })();}
+async function loadDebridSettings(){var el=document.getElementById('debridsettings');if(!el)return;
+  var d={};try{d=await (await hfetch('/debrid/settings')).json();}catch(e){return;}
+  if(d.available===false){el.innerHTML='';return;}
+  var provs=d.providers||[];
+  var opts='<option value=""'+(!d.provider?' selected':'')+'>— none —</option>'+provs.map(function(p){
+    return '<option value="'+esc(p.id)+'"'+(d.provider===p.id?' selected':'')+'>'+esc(p.name)+'</option>';}).join('');
+  var keyline=d.has_key?('<span style="color:#3fb950;font-size:12px">key saved ('+esc(d.key_hint||'')+')</span> <button class=sec style="padding:2px 8px" onclick="debridClearKey()">✕ remove key</button>')
+    :'<span style="color:var(--faint);font-size:12px">no key saved</span>';
+  var statusbadge=d.active?'<span class="lib-badge t-movie">active</span>':'<span class="lib-badge">off</span>';
+  el.innerHTML='<div class=aiset>'
+    +'<div class=meta style="justify-content:flex-start;margin-top:0;gap:9px"><h4>⚡ Debrid <span style="font-weight:400;color:var(--muted);font-size:12px">(optional)</span></h4>'+statusbadge+'</div>'
+    +'<div style="font-size:12.5px;color:var(--muted);margin:6px 0 10px;line-height:1.6">A debrid service (Real-Debrid / TorBox) keeps a huge library of torrents already downloaded on its own fast servers. With one enabled, grabbing a torrent that it has <b>cached</b> becomes an instant high-speed download — no waiting on seeders. We never join the swarm; we just pull the finished file over HTTP, through the VPN, and scan it like everything else. Your API key stays on this box and is only ever sent to the provider through the tunnel.</div>'
+    +'<div id=debridMsg style="font-size:12.5px;margin:0 0 8px"></div>'
+    +'<div class=row style="gap:10px;flex-wrap:wrap;align-items:center">'
+    +'<label style="font-size:12.5px;color:var(--muted)">Provider</label>'
+    +'<select id=dbProvider style="background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);color:var(--text);padding:7px 10px;font-size:13px">'+opts+'</select>'
+    +'<label style="font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:6px"><input type=checkbox id=dbEnabled'+(d.enabled?' checked':'')+'> Enabled</label>'
+    +'<label style="font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:6px" title="When on, torrent grabs go through debrid (instant if cached); if debrid can’t take it, it falls back to the normal swarm download."><input type=checkbox id=dbAuto'+(d.auto?' checked':'')+'> Use for torrent grabs</label>'
+    +'</div>'
+    +'<div class=row style="margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap">'
+    +'<input type=password id=dbKey autocomplete=off placeholder="paste API key'+(d.has_key?' to replace the saved one':'')+'" style="flex:1;min-width:220px;background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);color:var(--text);font:12.5px var(--mono);padding:9px 10px">'
+    +keyline+'</div>'
+    +'<div class=row style="margin-top:10px;gap:8px"><button class=sec onclick="debridSave(this)">Save</button>'
+    +'<button class=sec onclick="debridTest(this)">Test connection</button>'
+    +'<span style="font-size:11.5px;color:var(--faint);align-self:center">Where to get a key: <a href="https://real-debrid.com" target=_blank rel=noopener>real-debrid.com</a> · <a href="https://torbox.app" target=_blank rel=noopener>torbox.app</a> (paid services).</span></div>'
+    +'<div id=debridPending style="margin-top:12px"></div>'
+    +'</div>';
+  loadDebridPending();}
+function debridMsg(m,bad){var e=document.getElementById('debridMsg');if(e){e.textContent=m||'';e.style.color=bad?'#f85149':'#3fb950';}}
+function debridPatch(){return {enabled:document.getElementById('dbEnabled').checked,
+  auto:document.getElementById('dbAuto').checked,
+  provider:document.getElementById('dbProvider').value,
+  key:document.getElementById('dbKey').value.trim()};}
+async function debridSave(btn){btn.disabled=true;debridMsg('Saving…');
+  try{var r=await hfetch('/debrid/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(debridPatch())});var j=await r.json();
+    debridMsg(j.active?'Saved — debrid is active.':'Saved.');loadDebridSettings();}
+  catch(e){debridMsg('Could not save.',true);}btn.disabled=false;}
+async function debridTest(btn){btn.disabled=true;debridMsg('Testing…');
+  var p=debridPatch();
+  try{var r=await hfetch('/debrid/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p.provider,key:p.key})});var j=await r.json();
+    if(j.ok)debridMsg('✓ Connected as '+esc(j.user||'ok')+(j.premium?' (premium)':'')+'.');
+    else debridMsg('✗ '+esc(j.error||'test failed')+'.',true);}
+  catch(e){debridMsg('Test failed.',true);}btn.disabled=false;}
+async function debridClearKey(){if(!confirm('Remove the saved debrid API key from the box?'))return;
+  try{await hfetch('/debrid/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clear_key:true,enabled:false})});}catch(e){}loadDebridSettings();}
+async function loadDebridPending(){var el=document.getElementById('debridPending');if(!el)return;
+  var d={};try{d=await (await hfetch('/debrid/pending')).json();}catch(e){return;}
+  var items=(d.items||[]).filter(function(j){return j.state==='caching'||j.state==='submitting';});
+  if(!items.length){el.innerHTML='';return;}
+  el.innerHTML=items.map(function(j){return '<div style="font-size:12px;color:var(--muted);padding:3px 0">⚡ '+esc(j.name||'')+' — <span style="color:var(--text)">caching on '+esc(j.provider||'')+'…</span> (appears in Downloads when ready)</div>';}).join('');}
 var NAV_TABS=['search','sources','hunt','engines','downloads','library','settings'];
 var _navBusy=false;
 // Tabs used to be pure JS with no URL, so the browser's Back button left the app
@@ -2646,7 +2702,7 @@ function applyHash(){
   var modalOpen=modal && !modal.hidden;
   if(modalOpen && !wantModal){ libCloseModal(true); }
 }
-function showTab(name,fromNav){['search','sources','hunt','engines','downloads','library','settings'].forEach(function(t){var p=document.getElementById('tab-'+t);if(p)p.hidden=(t!==name);var b=document.querySelector('.tabbtn[data-tab='+t+']');if(b)b.classList.toggle('active',t===name);});if(name==='library'&&!LIB_LOADED)loadLibrary();if(name==='engines'){loadEngines();loadAiSettings();loadNotifySettings();}if(name==='settings'){renderThemePick();loadVpnSettings();}if(name==='hunt'){loadHunts();if(!huntTimer)huntTimer=setInterval(function(){if(huntTabActive())loadHunts();},4000);}
+function showTab(name,fromNav){['search','sources','hunt','engines','downloads','library','settings'].forEach(function(t){var p=document.getElementById('tab-'+t);if(p)p.hidden=(t!==name);var b=document.querySelector('.tabbtn[data-tab='+t+']');if(b)b.classList.toggle('active',t===name);});if(name==='library'&&!LIB_LOADED)loadLibrary();if(name==='engines'){loadEngines();loadAiSettings();loadNotifySettings();}if(name==='settings'){renderThemePick();loadVpnSettings();loadDebridSettings();}if(name==='hunt'){loadHunts();if(!huntTimer)huntTimer=setInterval(function(){if(huntTabActive())loadHunts();},4000);}
 if(!fromNav){_navBusy=true;try{if(location.hash.slice(1).split('/')[0]!==name){location.hash=name;}}finally{_navBusy=false;}}}
 async function loadEngines(){var el=document.getElementById('engines');el.innerHTML='<div class=empty>Checking engines…</div>';
 var r=await fetch('/engines');if(r.status==401){location.href='/login';return}
@@ -3642,7 +3698,7 @@ class H(BaseHTTPRequestHandler):
             # 302 here made fetch() follow to the login HTML, JSON parsing throw, and the Deep
             # Hunt tab silently freeze after every container restart (sessions are in-memory).
             if path in ("/status", "/library", "/token") or path.startswith(("/hunt/", "/ai/",
-                                                                              "/notify/")) \
+                                                                              "/notify/", "/debrid/")) \
                     or path in ("/search", "/engines", "/sources"):
                 self._send(401, "auth required", "text/plain")
             else:
@@ -3674,6 +3730,15 @@ class H(BaseHTTPRequestHandler):
             st = ai.status() if ai else {"enabled": False, "reachable": False,
                                          "url": "", "model": "", "models": []}
             self._send(200, json.dumps(st), "application/json")
+        elif path == "/debrid/settings":
+            # UI-safe view: the stored API key is NEVER returned here (only has_key + last 4).
+            cfg = debrid.get_config() if debrid else {"available": False}
+            if debrid:
+                cfg["available"] = True
+            self._send(200, json.dumps(cfg), "application/json")
+        elif path == "/debrid/pending":
+            self._send(200, json.dumps({"items": debrid.pending() if debrid else []}),
+                       "application/json")
         elif path == "/notify/config":
             cfg = notify.public_config() if notify else {"enabled": False, "available": False}
             if notify:
@@ -3843,6 +3908,19 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e:
                     self._send(502, "direct download failed (%s)" % str(e)[:120])
             elif magnet.startswith("magnet:"):
+                # If debrid is active, hand the magnet to the service (instant if cached,
+                # otherwise fetched on their servers) and pull the finished file over HTTP.
+                # We never join the swarm that way. If debrid rejects/errs, fall straight
+                # back to our own libtorrent path so a grab is never lost.
+                if debrid is not None and debrid.auto_on():
+                    try:
+                        r = debrid.submit(magnet, cat)
+                        self._send(200, json.dumps({"ok": True, "via": "debrid", **r}),
+                                   "application/json")
+                        return
+                    except Exception as e:
+                        print(f"[vpntorrent] debrid grab failed, falling back to libtorrent: {e}",
+                              flush=True)
                 try:
                     add_magnet(magnet, cat)
                     self._send(200, "ok")
@@ -4067,6 +4145,33 @@ class H(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"text": txt}), "application/json")
             else:
                 self._send(404, "not found")
+        elif path.startswith("/debrid/"):
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                n = -1
+            if not (0 <= n <= 65536):
+                self._send(400, "bad request"); return
+            try:
+                data = json.loads(self.rfile.read(n).decode() or "{}")
+            except Exception:
+                data = {}
+            if debrid is None:
+                self._send(200, json.dumps({"ok": False, "error": "debrid unavailable"}),
+                           "application/json"); return
+            if path == "/debrid/settings":
+                # patch persists server-side; the response NEVER contains the key
+                self._send(200, json.dumps(debrid.set_config(data)), "application/json")
+            elif path == "/debrid/test":
+                self._send(200, json.dumps(debrid.test(data.get("provider"), data.get("key"))),
+                           "application/json")
+            elif path == "/debrid/cached":
+                mags = data.get("magnets") or []
+                mags = [str(m)[:3000] for m in mags if isinstance(m, str)][:60]
+                self._send(200, json.dumps({"cached": debrid.check_cached(mags)}),
+                           "application/json")
+            else:
+                self._send(404, "not found")
         elif path.startswith("/hunt/"):
             try:
                 n = int(self.headers.get("Content-Length", 0) or 0)
@@ -4154,6 +4259,14 @@ if __name__ == "__main__":
             trackers.start()
         except Exception as e:
             print(f"[vpntorrent] tracker warmer failed to start: {e}", flush=True)
+    if debrid is not None and fetcher is not None:
+        # inject the direct-download hand-off + the VPN gate; debrid stays dormant until a
+        # key is saved in Settings. Cached grabs resolve to a direct link and flow through
+        # the SAME fetcher engine (public-host + VPN guarded), so no new egress path opens.
+        try:
+            debrid.start(fetch_add=fetcher.add, vpn_check=lambda: bool(vpn_ok))
+        except Exception as e:
+            print(f"[vpntorrent] debrid wiring failed: {e}", flush=True)
     if hunt is not None:
         # Inject the LLM brain (Phase 2). The brain itself checks whether AI is on and
         # falls back to hunt's deterministic stub when it isn't, so this is safe to wire
