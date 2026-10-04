@@ -68,3 +68,4 @@ mirror-to-drive.sh
 # packaged release artifacts (rebuild with package.sh; never ship a prebuilt blob
 # because it can silently carry the packager's own config into someone else's install)
 vpntorrent-bundle.tar.gz
+FMHY-INTEGRATION-PLAN.md

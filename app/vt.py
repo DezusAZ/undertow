@@ -70,6 +70,10 @@ try:
 except Exception:
     fetcher = None
 try:
+    import trackers  # local module: live public-tracker list, appended to every magnet so bare-infohash torrents find peers fast
+except Exception:
+    trackers = None
+try:
     import ai  # local module: optional local-AI (Ollama) features — off by default
 except Exception:
     ai = None
@@ -437,6 +441,17 @@ def add_magnet(magnet, cat):
     os.makedirs(path, exist_ok=True)
     p = lt.parse_magnet_uri(magnet)
     p.save_path = path
+    # Fatten the tracker set: a magnet from a DHT source often ships with 0-few trackers and
+    # then sits at "fetching info" / 0 peers until DHT alone finds peers. Merge in a live list
+    # of known-good public trackers so peers turn up fast. libtorrent de-dupes announce URLs.
+    if trackers is not None:
+        try:
+            have = set(p.trackers or [])
+            extra = [t for t in trackers.get_trackers() if t not in have]
+            if extra:
+                p.trackers = list(p.trackers or []) + extra
+        except Exception:
+            pass
     # We manage start/stop ourselves. Auto-management lets libtorrent override our
     # pause() (and would auto-seed completed torrents), so turn it off. But we must
     # ALSO clear the default `paused` flag: libtorrent's add_torrent_params default is
@@ -4132,6 +4147,13 @@ if __name__ == "__main__":
             fetcher.start(SAVE, FOLDERS, vpn_check=lambda: bool(vpn_ok))
         except Exception as e:
             print(f"[vpntorrent] direct-download engine failed to start: {e}", flush=True)
+    if trackers is not None:
+        # warm the live public-tracker list in the background so magnet adds get a fat,
+        # already-cached tracker set (fetch goes out through the tunnel like everything else)
+        try:
+            trackers.start()
+        except Exception as e:
+            print(f"[vpntorrent] tracker warmer failed to start: {e}", flush=True)
     if hunt is not None:
         # Inject the LLM brain (Phase 2). The brain itself checks whether AI is on and
         # falls back to hunt's deterministic stub when it isn't, so this is safe to wire

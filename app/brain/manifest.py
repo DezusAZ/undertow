@@ -30,6 +30,10 @@ SOURCES = {
                           "short exact-ish keywords only"},
     "bt4g":      {"kind": "torrent", "route": ("adapter", "bt4g"), "modes": ["keyword"],
                   "delivers": "magnet", "cats": "all", "note": "BT4G torrent meta-index (no seed counts)"},
+    "torrentscsv": {"kind": "torrent", "route": ("adapter", "torrentscsv"), "modes": ["keyword"],
+                  "delivers": "magnet", "cats": "all",
+                  "note": "torrents-csv.com — keyless open torrent index with scraped seed counts; "
+                          "fast, different corpus from the DHT crawler; short exact-ish keywords"},
     "archive":   {"kind": "archive", "route": ("adapter", "internetarchive"), "modes": ["keyword", "title", "id"],
                   "delivers": "file/torrent", "cats": "all",
                   "note": "Internet Archive: public-domain/CC media, old software, live music, "
