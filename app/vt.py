@@ -2702,7 +2702,9 @@ async function loadDebridSettings(){var el=document.getElementById('debridsettin
     +'</div>'
     +'<div class=row style="margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap">'
     +'<input type=password id=dbKey autocomplete=off placeholder="paste API key'+(d.has_key?' to replace the saved one':'')+'" style="flex:1;min-width:220px;background:var(--surface);border:1px solid var(--hair);border-radius:var(--rs);color:var(--text);font:12.5px var(--mono);padding:9px 10px">'
+    +'<button type=button class=sec id=dbKeyToggle style="padding:7px 10px" title="Show/hide what you pasted, to check it copied in full" onclick="debridToggleKey(this)">👁 Show</button>'
     +keyline+'</div>'
+    +'<div style="font-size:11px;color:var(--faint);margin-top:4px">👁 Show reveals only what you type here so you can confirm the full key copied — the saved key itself never leaves the box.</div>'
     +'<div class=row style="margin-top:10px;gap:8px"><button class=sec onclick="debridSave(this)">Save</button>'
     +'<button class=sec onclick="debridTest(this)">Test connection</button>'
     +'<span style="font-size:11.5px;color:var(--faint);align-self:center">Where to get a key: <a href="https://real-debrid.com" target=_blank rel=noopener>real-debrid.com</a> · <a href="https://torbox.app" target=_blank rel=noopener>torbox.app</a> (paid services).</span></div>'
@@ -2710,6 +2712,7 @@ async function loadDebridSettings(){var el=document.getElementById('debridsettin
     +'</div>';
   loadDebridPending();}
 function debridMsg(m,bad){var e=document.getElementById('debridMsg');if(e){e.textContent=m||'';e.style.color=bad?'#f85149':'#3fb950';}}
+function debridToggleKey(btn){var i=document.getElementById('dbKey');if(!i)return;if(i.type==='password'){i.type='text';btn.textContent='🙈 Hide';}else{i.type='password';btn.textContent='👁 Show';}}
 function debridPatch(){return {enabled:document.getElementById('dbEnabled').checked,
   auto:document.getElementById('dbAuto').checked,
   provider:document.getElementById('dbProvider').value,
