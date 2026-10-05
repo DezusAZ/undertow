@@ -54,22 +54,29 @@ _CHALLENGE = re.compile(
 # Crawl bounds (keep it bounded + polite; a dead server can't blow the budget).
 _MAX_SEEDS_TO_EXPAND = 14     # confirmed seeds we climb out from, per round
 _MAX_CANDIDATES = 90          # sibling/child dirs we probe per expansion round
-_SNOWBALL_HOSTS = 8          # hosts we re-dork (site:host) to find MORE open dirs
+_SNOWBALL_HOSTS = 14         # hosts we re-dork (site:host) to find MORE open dirs
 _FETCH_TIMEOUT = 6
 _READ_CAP = 1_000_000
 
 # A query that already contains search operators is a ready-made dork (see open_dir_seeds).
 _HAS_OPS = re.compile(r'(?:\b(?:intitle|inurl|intext|site|filetype|ext):|"index of)', re.I)
 
+# Cleanest phrase dorks FIRST — _seed_dorks sends the first few to Bing's RSS feed, which
+# honours a plain phrase operator well but mangles the fancier `-inurl:(...)` form into
+# keyword soup. Keep that one last so only SearXNG (which parses it) ever sees it.
 _DORKS_Q = [
     'intitle:"index of" {q}',
     '"index of /" {q}',
+    'intitle:"index of" "parent directory" {q}',
+    'intitle:"index of" "last modified" {q}',
     '-inurl:(jsp|pl|php|html|aspx|htm|cf|shtml) intitle:"index.of" {q}',
 ]
 _DORKS_QE = [
     'intitle:"index of" {q} {ext}',
     'intitle:"index of" {ext} {q}',
     '"index of /" {q} {ext}',
+    'intitle:"index of" "parent directory" {q} {ext}',
+    'intitle:"index of" "last modified" {q} {ext}',
 ]
 
 _INDEX_SIG = re.compile(
@@ -231,6 +238,72 @@ def _flaresolverr_get(url, timeout):
         return html if (_INDEX_SIG.search(html) or not _CHALLENGE.search(html[:4000])) else None
     except Exception:
         return None
+
+
+def _bing_dork(query, timeout):
+    """Second open-directory seed engine: Bing's RSS results feed. SearXNG is the only
+    *local* engine that honours `intitle:"index of"` dorks, but it gets rate-limited at the
+    shared VPN exit IP, so dork yield is thin. Bing's `?format=rss` endpoint honours the same
+    operators, answers in ~1s, is NOT bot-walled for the feed, and returns clean real URLs (no
+    ck/a redirect wrapping) — a resilient keyless complement. Falls back to FlareSolverr only
+    if the plain fetch is blocked. Returns [{url, title}]. Never raises."""
+    rss = ("https://www.bing.com/search?format=rss&count=30&q="
+           + urllib.parse.quote(query))
+    xml = None
+    try:
+        req = urllib.request.Request(rss, headers={"User-Agent": _UA, "Accept": "application/rss+xml,*/*"})
+        with _SAFE_OPENER.open(req, timeout=timeout) as resp:
+            xml = resp.read(2_000_000).decode("utf-8", "replace")
+    except Exception:
+        xml = _flaresolverr_get(rss, timeout)        # bot-walled -> render it
+    if not xml:
+        return []
+    # Bing's RSS feed does NOT strictly honour `intitle:` — it mixes in general web hits, so
+    # most rows are landing pages, not listings. Keep only DIRECTORY-SHAPED URLs (path ends in
+    # "/"): that's nearly all real "index of" dirs and almost no junk, so Bing adds genuine
+    # seeds (archive.org item dirs, open mirrors) without burning the crawl budget on noise.
+    # The confirm step still probes each one, so this only trims; it never lets junk through.
+    out, seen = [], set()
+    for link in re.findall(r"<link>\s*(https?://[^<\s]+?)\s*</link>", xml):
+        sp = urllib.parse.urlsplit(link)
+        host = sp.hostname or ""
+        if not host or "bing.com" in host:
+            continue
+        if not sp.path.endswith("/"):
+            continue                                   # not directory-shaped -> skip
+        if link not in seen:
+            seen.add(link)
+            out.append({"url": link, "title": ""})
+    return out
+
+
+def _seed_dorks(dorks, timeout, bing_max=3):
+    """Run open-directory dorks across BOTH keyless seed engines in parallel and merge:
+    SearXNG for every dork, plus Bing's RSS feed for the first `bing_max` (Bing is fast but
+    caps a feed at ~10 rows, so we spend it on the strongest dorks). De-duped by URL; the
+    bot-wall-resistant Bing hits fill the gap when SearXNG is throttled. Never raises."""
+    tasks = [(_searx, d) for d in dorks] + [(_bing_dork, d) for d in dorks[:bing_max]]
+    if not tasks:
+        return []
+    hits, seen = [], set()
+    ex = ThreadPoolExecutor(max_workers=min(10, len(tasks)))
+    try:
+        futs = [ex.submit(fn, d, timeout) for (fn, d) in tasks]
+        try:
+            for f in as_completed(futs, timeout=timeout + 2):
+                try:
+                    for r in (f.result() or []):
+                        u = r.get("url", "")
+                        if u and u not in seen:
+                            seen.add(u)
+                            hits.append(r)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    return hits
 
 
 def _fetch(url, timeout=None, ua_seed=0, allow_solver=True):
@@ -527,23 +600,10 @@ def open_dir_seeds(query, ext="", timeout=16):
     else:
         dorks = [t.replace("{q}", q).replace("{ext}", ext)
                  for t in (_DORKS_QE if ext else _DORKS_Q)]
-    hits = []
-    ex = ThreadPoolExecutor(max_workers=min(6, len(dorks)))
-    try:
-        futs = [ex.submit(_searx, d, 10) for d in dorks]
-        try:
-            for f in as_completed(futs, timeout=13):
-                try:
-                    hits.extend(f.result() or [])
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
-    # The local SearXNG node's engines are all rate-limited at the shared VPN exit IP (live:
-    # 0 results for every query). Fall through to the direct transports (DDG lite answers
-    # from here) so the hunt gets seeds at all. Bounded by the caller's deadline.
+    hits = _seed_dorks(dorks, 10)
+    # If BOTH keyless seed engines (SearXNG + Bing RSS) come up dry — rate-limited at the
+    # shared VPN exit IP — fall through to the direct transports (DDG lite answers from here)
+    # so the hunt gets seeds at all. Bounded by the caller's deadline.
     if not hits and _dorks is not None:
         for d in dorks[:2]:
             if time.monotonic() > deadline - 4:
@@ -634,20 +694,8 @@ def _snowball(confirmed, ext, deadline):
             dorks.append('site:%s "index of" %s' % (h, ext))
     if not dorks:
         return []
-    hits = []
-    ex = ThreadPoolExecutor(max_workers=min(8, len(dorks)))
-    try:
-        futs = [ex.submit(_searx, d, 10) for d in dorks]
-        try:
-            for f in as_completed(futs, timeout=max(1.0, deadline - time.monotonic())):
-                try:
-                    hits.extend(f.result() or [])
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
+    rem = max(3.0, deadline - time.monotonic())
+    hits = _seed_dorks(dorks, min(10.0, rem), bing_max=6)
     roots, seen = [], set(confirmed)
     for hh in hits:
         r = _root_of(hh.get("url", ""))
@@ -668,23 +716,10 @@ def discover(query, ext="", timeout=32):
     ext = (ext or "").strip().lstrip(".").lower()
     deadline = time.monotonic() + max(8, timeout)
 
-    # ---- STAGE 1: SEED via dorks -----------------------------------------
+    # ---- STAGE 1: SEED via dorks (SearXNG + Bing RSS, in parallel) --------
     dorks = [t.replace("{q}", q).replace("{ext}", ext)
              for t in (_DORKS_QE if ext else _DORKS_Q)]
-    hits = []
-    ex = ThreadPoolExecutor(max_workers=min(6, len(dorks)))
-    try:
-        futs = [ex.submit(_searx, d, 10) for d in dorks]
-        try:
-            for f in as_completed(futs, timeout=13):
-                try:
-                    hits.extend(f.result() or [])
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
+    hits = _seed_dorks(dorks, 12)
 
     roots, seen_roots = [], set()
     for h in hits:
@@ -692,7 +727,7 @@ def discover(query, ext="", timeout=32):
         if r and r not in seen_roots:
             seen_roots.add(r)
             roots.append(r)
-        if len(roots) >= 40:
+        if len(roots) >= 60:
             break
 
     confirmed = {}          # url -> src
